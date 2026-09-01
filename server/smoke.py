@@ -33,6 +33,23 @@ def main() -> int:
         print("health")
         check("서버 응답", c.get("/health").json() == {"ok": True})
 
+        print("\n로그인 없이 호출")
+        anon = c.get("/api/projects")
+        check("토큰 없으면 401", anon.status_code == 401, anon.status_code)
+
+        print("\n[화면] 회원가입")
+        signup = c.post(
+            "/api/auth/signup",
+            json={
+                "email": f"smoke-{uuid.uuid4().hex[:8]}@example.com",
+                "password": "smoke-test-password",
+                "name": "스모크",
+            },
+        )
+        check("회원가입", signup.status_code == 201, signup.text)
+        token = signup.json()["token"]
+        c.headers["Authorization"] = f"Bearer {token}"
+
         print("\n[화면] 새 프로젝트")
         project = c.post(
             "/api/projects",

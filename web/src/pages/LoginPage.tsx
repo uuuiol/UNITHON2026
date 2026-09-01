@@ -1,21 +1,32 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { login, signup } from '../api/client'
+import { useMutation } from '../api/hooks'
+import { setToken } from '../lib/authToken'
 import logoMark from '../assets/img/logo-mark.svg'
 import logoWordmark from '../assets/img/logo-wordmark.svg'
 
-/**
- * 로그인 (Figma 311:21134).
- *
- * 인증은 아직 없다. 어느 버튼을 눌러도 첫 화면으로 들어간다 — 막아 두면
- * 데모에서 아무 데도 못 가고, 있는 척 검사하면 없는 계정을 만들어야 한다.
- * 진짜 인증이 붙는 자리는 `signIn()` 한 곳이다.
- */
+/** 로그인 (Figma 311:21134). 이메일/이름을 더 넣으면 그 자리에서 회원가입 모드가 된다. */
 export function LoginPage() {
   const navigate = useNavigate()
+  const [mode, setMode] = useState<'login' | 'signup'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [ssoNotice, setSsoNotice] = useState(false)
 
-  const signIn = () => navigate('/projects')
+  const loginMutation = useMutation(login)
+  const signupMutation = useMutation(signup)
+  const active = mode === 'login' ? loginMutation : signupMutation
+
+  const signIn = async () => {
+    const result =
+      mode === 'login' ? await loginMutation.run(email, password) : await signupMutation.run(email, password, name)
+    if (result) {
+      setToken(result.token)
+      navigate('/projects')
+    }
+  }
 
   return (
     <div className="flex min-h-screen bg-white">
@@ -28,8 +39,12 @@ export function LoginPage() {
           <img src={logoWordmark} alt="더드미" className="h-[29.8px] w-[82px]" />
         </div>
 
-        <h1 className="mt-[31px] text-[34px] font-bold text-heading">다시 만나서 반가워요</h1>
-        <p className="mt-[10px] text-[16px] text-muted">계속하려면 계정에 로그인해주세요.</p>
+        <h1 className="mt-[31px] text-[34px] font-bold text-heading">
+          {mode === 'login' ? '다시 만나서 반가워요' : '계정을 만들어볼까요'}
+        </h1>
+        <p className="mt-[10px] text-[16px] text-muted">
+          {mode === 'login' ? '계속하려면 계정에 로그인해주세요.' : '이메일과 비밀번호만 있으면 바로 시작할 수 있어요.'}
+        </p>
 
         <form
           className="mt-[62px] flex w-[484px] flex-col"
@@ -38,7 +53,23 @@ export function LoginPage() {
             signIn()
           }}
         >
-          <Label htmlFor="login-email">이메일</Label>
+          {mode === 'signup' ? (
+            <>
+              <Label htmlFor="login-name">이름</Label>
+              <Input
+                id="login-name"
+                type="text"
+                autoComplete="name"
+                placeholder="홍길동"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </>
+          ) : null}
+
+          <Label htmlFor="login-email" className={mode === 'signup' ? 'mt-[27px]' : ''}>
+            이메일
+          </Label>
           <Input
             id="login-email"
             type="email"
@@ -54,24 +85,31 @@ export function LoginPage() {
           <Input
             id="login-password"
             type="password"
-            autoComplete="current-password"
+            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             placeholder="••••••••••••"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
 
-          <button
-            type="button"
-            className="mt-[6px] self-end text-[14px] font-medium text-main hover:underline"
-          >
-            비밀번호를 잊으셨나요?
-          </button>
+          {mode === 'login' ? (
+            <button
+              type="button"
+              className="mt-[6px] self-end text-[14px] font-medium text-main hover:underline"
+            >
+              비밀번호를 잊으셨나요?
+            </button>
+          ) : null}
+
+          {active.error ? (
+            <p className="mt-[16px] text-[14px] font-medium text-danger">{active.error}</p>
+          ) : null}
 
           <button
             type="submit"
-            className="mt-[21px] h-[56px] rounded-[10px] bg-main text-[16px] font-semibold text-white transition-colors hover:bg-[#2872dd]"
+            disabled={active.pending}
+            className="mt-[21px] h-[56px] rounded-[10px] bg-main text-[16px] font-semibold text-white transition-colors hover:bg-[#2872dd] disabled:opacity-60"
           >
-            로그인
+            {active.pending ? '처리 중...' : mode === 'login' ? '로그인' : '회원가입'}
           </button>
         </form>
 
@@ -82,14 +120,23 @@ export function LoginPage() {
         </div>
 
         <div className="mt-[26px] flex w-[484px] flex-col gap-[14px]">
-          <SocialButton onClick={signIn}>G&nbsp;&nbsp;Google로 계속하기</SocialButton>
-          <SocialButton onClick={signIn}>→&nbsp;&nbsp;SSO로 계속하기</SocialButton>
+          <SocialButton onClick={() => setSsoNotice(true)}>G&nbsp;&nbsp;Google로 계속하기</SocialButton>
+          <SocialButton onClick={() => setSsoNotice(true)}>→&nbsp;&nbsp;SSO로 계속하기</SocialButton>
         </div>
+        {ssoNotice ? (
+          <p className="mt-[12px] text-[14px] text-muted">소셜 로그인은 아직 준비 중이에요. 이메일로 진행해주세요.</p>
+        ) : null}
 
         <p className="mt-[142px] flex items-center gap-[41px] text-[14px]">
-          <span className="text-muted">아직 계정이 없으신가요?</span>
-          <button type="button" onClick={signIn} className="font-semibold text-main hover:underline">
-            회원가입
+          <span className="text-muted">
+            {mode === 'login' ? '아직 계정이 없으신가요?' : '이미 계정이 있으신가요?'}
+          </span>
+          <button
+            type="button"
+            onClick={() => setMode(mode === 'login' ? 'signup' : 'login')}
+            className="font-semibold text-main hover:underline"
+          >
+            {mode === 'login' ? '회원가입' : '로그인'}
           </button>
         </p>
       </div>

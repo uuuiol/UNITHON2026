@@ -409,10 +409,10 @@ function PersonaCard({
         aria-expanded={open}
         className="flex w-full items-center gap-[12px] px-[20px] py-[14px] text-left transition-colors hover:bg-black/[0.02]"
       >
-        <PersonaFace id={person.id} />
+        <PersonaFace id={person.code} />
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-[6px] text-[15px] font-semibold text-heading">
-            {label(person.id)}
+            {label(person.code)}
             {/* 어느 화면에 있었는지를 이름 옆에 붙여야 "10단계에 이 사람은
                 주문/결제에 있었구나"가 한눈에 읽힌다. */}
             {person.screen_title ? (

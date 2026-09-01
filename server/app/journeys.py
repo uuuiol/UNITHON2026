@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import Journey, Persona, Run, Step
+from .pipeline_export import SENTENCES
 
 #: 이탈로 세는 종료 사유. api.py 의 이탈률과 같은 정의를 쓴다 —
 #: 예산 상한으로 우리가 끊은 것은 '포기'가 아니다(기획서 4장).
@@ -33,6 +34,11 @@ class Screen:
     key: str
     title: str
     url: str | None
+    #: 이 화면에 처음 머문 스텝의 생각·행동. /steps 상세 패널이 쓴다.
+    thought: str | None = None
+    action: str | None = None
+    action_target: str | None = None
+    blocked: bool = False
 
 
 @dataclass
@@ -44,6 +50,12 @@ class Walk:
     outcome: str  # 'success' | 'drop' | 'other'
     step_count: int
     screens: list[Screen] = field(default_factory=list)
+    #: /steps 상세 패널이 쓴다. 페르소나 표 자체는 test_id 로 따로 조회하므로,
+    #: 여기 있는 것만으로 화면을 그릴 수 있게 조금 중복해서 들고 있는다.
+    persona_code: str = ""
+    age_band: str = ""
+    gender: str = ""
+    termination_reason: str | None = None
 
     @property
     def signature(self) -> tuple[str, ...]:
@@ -71,20 +83,23 @@ def _outcome(journey: Journey) -> str:
     return "other"
 
 
-def load_walks(session: Session, test_id: uuid.UUID) -> list[Walk]:
-    """테스트의 모든 여정을 화면 순서로 접어 온다.
+def load_walks(
+    session: Session, test_id: uuid.UUID | None, run_id: uuid.UUID | None = None
+) -> list[Walk]:
+    """여정을 화면 순서로 접어 온다.
 
     같은 화면에 연달아 머문 스텝(스크롤·입력)은 한 마디로 합친다. 합치지 않으면
     "장바구니 → 장바구니 → 장바구니" 가 서로 다른 경로가 되어 묶음이 흩어진다.
+
+    `run_id`를 주면 그 실행 하나만(예: 방금 로컬에서 돌린 실행, `/api/live/{run_id}`),
+    안 주면 `test_id`의 모든 실행(A/B/C/D)을 합쳐서 본다.
     """
-    journeys = list(
-        session.scalars(
-            select(Journey)
-            .join(Run, Run.id == Journey.run_id)
-            .where(Run.test_id == test_id)
-            .order_by(Journey.started_at)
-        )
-    )
+    query = select(Journey).order_by(Journey.started_at)
+    if run_id is not None:
+        query = query.where(Journey.run_id == run_id)
+    else:
+        query = query.join(Run, Run.id == Journey.run_id).where(Run.test_id == test_id)
+    journeys = list(session.scalars(query))
     if not journeys:
         return []
 
@@ -96,6 +111,13 @@ def load_walks(session: Session, test_id: uuid.UUID) -> list[Walk]:
     )
     for step in steps:
         by_journey[step.journey_id].append(step)
+
+    personas = {
+        p.id: p
+        for p in session.scalars(
+            select(Persona).where(Persona.id.in_([j.persona_id for j in journeys]))
+        )
+    }
 
     walks: list[Walk] = []
     for journey in journeys:
@@ -109,8 +131,13 @@ def load_walks(session: Session, test_id: uuid.UUID) -> list[Walk]:
                 continue
             if screens and screens[-1].key == key:
                 continue
-            screens.append(Screen(key=key, title=step.action_target or key, url=step.url))
+            screens.append(Screen(
+                key=key, title=step.action_target or key, url=step.url,
+                thought=step.thought, action=step.action,
+                action_target=step.action_target, blocked=not step.allowed,
+            ))
 
+        persona = personas.get(journey.persona_id)
         walks.append(
             Walk(
                 journey_id=journey.id,
@@ -118,6 +145,10 @@ def load_walks(session: Session, test_id: uuid.UUID) -> list[Walk]:
                 outcome=_outcome(journey),
                 step_count=journey.step_count,
                 screens=screens,
+                persona_code=persona.code if persona else "",
+                age_band=persona.age_band if persona else "",
+                gender=persona.gender if persona else "",
+                termination_reason=journey.termination_reason,
             )
         )
 
@@ -292,29 +323,190 @@ def display_name(code: str) -> str:
     return FAMILY[index % len(FAMILY)] + GIVEN[(index // len(FAMILY)) % len(GIVEN)]
 
 
-def persona_rows(session: Session, test_id: uuid.UUID, walks: list[Walk]) -> list[dict]:
-    """사이드바 '페르소나' 탭 목록. 여정이 아직 없으면 결과 칸은 비운다."""
-    personas = list(
-        session.scalars(select(Persona).where(Persona.test_id == test_id).order_by(Persona.code))
-    )
-    by_persona = {w.persona_id: w for w in walks}
-
-    rows = []
-    for persona in personas:
-        walk = by_persona.get(persona.id)
-        rows.append(
-            {
-                "id": str(persona.id),
-                "code": persona.code,
-                "name": display_name(persona.code),
-                "age_band": persona.age_band,
-                "gender": persona.gender,
-                "outcome": walk.outcome if walk else None,
-                "step_count": walk.step_count if walk else None,
-            }
-        )
-    return rows
-
-
 def outcome_counts(walks: list[Walk]) -> Counter:
     return Counter(w.outcome for w in walks)
+
+
+# --------------------------------------------------------------------------- #
+# 스텝 상세 (막대를 눌렀을 때 뜨는 패널)
+# --------------------------------------------------------------------------- #
+
+#: DB의 4축(TraitCombo, 2단계) → 화면 라벨. agent-ux 자체 생성기의 축(5단계)과는 다르다
+#: (server/app/pipeline_export.py 참고 — 같은 이유로 갈라져 있다).
+AXIS_LABEL = {
+    "reading_style": "읽기 스타일",
+    "pace": "속도",
+    "tech_literacy": "숙련도",
+    "patience": "인내심",
+}
+
+END_LABEL = {
+    "goal_achieved": "목표 달성",
+    "gave_up": "포기",
+    "step_budget_exhausted": "스텝 소진",
+    "loop_detected": "제자리 맴돎",
+    "budget_cap": "예산 상한",
+    "runtime_error": "오류",
+}
+
+
+def walk_side_result(walk: Walk | None) -> dict | None:
+    """PersonaSideResult 하나 — 정상판/결함판을 나란히 놓을 때 한쪽 결과."""
+    if walk is None:
+        return None
+    return {
+        "outcome": walk.outcome,
+        "end_label": END_LABEL.get(walk.termination_reason or "", "진행 중"),
+        "step_count": walk.step_count,
+        "screens": [s.key for s in walk.screens],
+    }
+
+
+def compared_persona_rows(session: Session, run_baseline: Run | None, run_compare: Run) -> dict:
+    """[화면] '페르소나' 탭 — 정상판(baseline)과 결함판(compare)을 코드로 짝짓는다.
+
+    `ab.compare_projects`와 짝짓는 로직은 같지만, 여긴 같은 테스트의 Run 두 개를
+    받는다 — 페르소나 테이블이 하나뿐이라 code 매칭이 항상 100% 들어맞는다
+    (AB는 서로 다른 프로젝트라 인원표가 다르면 어긋날 수 있었다).
+
+    `run_baseline`이 없으면(clean 실행을 아직 안 돌렸다) baseline은 전부 None —
+    지어내지 않고 비워 둔다.
+    """
+    walks_baseline = (
+        {w.persona_code: w for w in load_walks(session, None, run_id=run_baseline.id)}
+        if run_baseline else {}
+    )
+    walks_compare = {w.persona_code: w for w in load_walks(session, None, run_id=run_compare.id)}
+    personas = list(
+        session.scalars(
+            select(Persona).where(Persona.test_id == run_compare.test_id).order_by(Persona.code)
+        )
+    )
+
+    items: list[dict] = []
+    changed = 0
+    exhausted = 0
+    for persona in personas:
+        baseline = walk_side_result(walks_baseline.get(persona.code))
+        wc = walks_compare.get(persona.code)
+        compare = walk_side_result(wc)
+        is_changed = bool(baseline and compare and baseline["outcome"] != compare["outcome"])
+        if is_changed:
+            changed += 1
+        if wc is not None and wc.termination_reason == "step_budget_exhausted":
+            exhausted += 1
+
+        items.append({
+            "id": str(persona.id),
+            "code": persona.code,
+            "name": display_name(persona.code),
+            "age_band": persona.age_band,
+            "gender": persona.gender,
+            "outcome": compare["outcome"] if compare else None,
+            "step_count": compare["step_count"] if compare else None,
+            "baseline": baseline,
+            "compare": compare,
+            "changed": is_changed,
+        })
+
+    return {
+        "total": len(items),
+        "items": items,
+        "changed": changed,
+        "exhausted": exhausted,
+        "baseline_run": str(run_baseline.id) if run_baseline else None,
+        "compare_run": str(run_compare.id),
+        "axes": AXIS_LABEL,
+    }
+
+
+def _step_persona(walk: Walk, screen: Screen | None) -> dict:
+    return {
+        "id": str(walk.persona_id),
+        "code": walk.persona_code,
+        "label": display_name(walk.persona_code),
+        # DB 특성은 2단계 문자열("높음"/"낮음" 등)이라 화면이 기대하는 1~5단계 숫자로
+        # 옮길 근거가 없다 — 지어내지 않고 비워 둔다.
+        "traits": {},
+        "age_band": walk.age_band,
+        "gender": walk.gender,
+        # StepPersona.outcome은 success/drop 둘뿐이다. 아직 진행 중이거나(other)
+        # 스텝을 다 쓰고 끝난 사람도 여기서는 drop 쪽으로 뭉뚱그린다 — 성공은 아니었다는
+        # 사실만 남기고, 정확한 사유는 end_label 에 따로 적는다.
+        "outcome": "success" if walk.outcome == "success" else "drop",
+        "end_label": END_LABEL.get(walk.termination_reason or "", "진행 중"),
+        "total_steps": walk.step_count,
+        "thought": (screen.thought if screen else None) or "",
+        "action": (screen.action if screen else None) or "",
+        "target": (screen.action_target if screen else None) or "",
+        "blocked": bool(screen.blocked) if screen else False,
+    }
+
+
+def build_steps_payload(walks: list[Walk], test_name: str) -> dict:
+    """스텝별 막대 + 필름스트립. build_diagram 과 같은 (position, screen_key) 서명을 쓴다 —
+    두 화면의 숫자가 어긋나면 안 되기 때문이다.
+
+    클릭 좌표·스크린샷은 DB에 없어서(찍는 코드가 없다) clicks/screen_clicks 는 빈 배열,
+    shot 은 null 로 정직하게 비워 둔다. replay(전체 여정 재생)도 같은 이유로 뺀다 —
+    화면 타입에서 둘 다 선택적(optional) 필드라 없어도 깨지지 않는다.
+    """
+    picked = [w for w in walks if w.screens]
+    if not picked:
+        return {
+            "steps": {}, "filmstrip": [], "sentences": SENTENCES, "axes": AXIS_LABEL,
+            "test_name": test_name,
+        }
+
+    depth = min(MAX_COLUMNS, max(len(w.screens) for w in picked))
+
+    by_node: dict[str, list[tuple[Walk, Screen]]] = defaultdict(list)
+    node_title: dict[str, str] = {}
+    for walk in picked:
+        for position, screen in enumerate(walk.screens[:depth]):
+            node_id = f"{position}:{screen.key}"
+            by_node[node_id].append((walk, screen))
+            node_title.setdefault(node_id, screen.title)
+
+    steps: dict[str, dict] = {}
+    for node_id, here in by_node.items():
+        position = int(node_id.split(":", 1)[0])
+        here_ids = {w.persona_id for w, _ in here}
+        elsewhere = [w for w in picked if len(w.screens) > position and w.persona_id not in here_ids]
+        finished = [w for w in picked if len(w.screens) <= position and w.persona_id not in here_ids]
+
+        steps[node_id] = {
+            "id": node_id,
+            "step": position + 1,
+            "screen": node_id.split(":", 1)[1],
+            "title": node_title[node_id],
+            "count": len(here),
+            "shot": None,
+            "clicks": [],
+            "screen_clicks": [],
+            "wasted": 0,
+            "personas": [_step_persona(w, s) for w, s in here],
+            "elsewhere": [_step_persona(w, None) for w in elsewhere],
+            "finished": [_step_persona(w, None) for w in finished],
+            "total": len(picked),
+        }
+
+    filmstrip: list[dict] = []
+    for position in range(depth):
+        nodes_here = [s for nid, s in steps.items() if int(nid.split(":", 1)[0]) == position]
+        if not nodes_here:
+            continue
+        top = max(nodes_here, key=lambda n: n["count"])
+        others = sum(n["count"] for n in nodes_here) - top["count"]
+        filmstrip.append({
+            "step": position + 1, "id": top["id"], "title": top["title"],
+            "count": top["count"], "shot": None, "others": others,
+        })
+
+    return {
+        "steps": steps,
+        "filmstrip": filmstrip,
+        "sentences": SENTENCES,
+        "axes": AXIS_LABEL,
+        "test_name": test_name,
+    }

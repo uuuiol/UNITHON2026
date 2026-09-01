@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .categories import CATEGORIES, normalize as normalize_category
@@ -17,13 +18,17 @@ from .estimates import DEFAULT_PAGE_COUNT, estimate
 from .journeys import (
     DROP_REASONS,
     build_diagram,
+    build_steps_payload,
+    compared_persona_rows,
     group_paths,
     load_walks,
     outcome_counts,
-    persona_rows,
 )
+from . import ab, auth, orchestrate, static_scan
 from .missions import analyze_as_dict
 from .models import (
+    AbTest,
+    Goal,
     Journey,
     Mission,
     Persona,
@@ -34,6 +39,7 @@ from .models import (
     SiteMap,
     SiteVariant,
     Test,
+    User,
 )
 from .personas import PersonaBuildError, assemble, popup_reachable_count
 from .thumbnails import capture as capture_thumbnail
@@ -46,21 +52,23 @@ class ConnectivityIn(BaseModel):
 
 
 @router.post("/connectivity/check")
-def connectivity_check(body: ConnectivityIn) -> dict:
+def connectivity_check(body: ConnectivityIn, user: User = Depends(auth.get_current_user)) -> dict:
     """[화면] 새 프로젝트 · 새 테스트의 '연결하기'.
 
-    DB를 쓰지 않는다 — 주소를 저장하기 전에 눌러볼 수 있어야 한다.
+    DB를 쓰지 않는다 — 주소를 저장하기 전에 눌러볼 수 있어야 한다. 프로젝트
+    데이터를 다루진 않지만 로그인은 요구한다 — 안 그러면 비로그인 상태로 서버가
+    아무 주소나 대신 열어주는 통로가 된다.
     """
     return check_as_dict(body.url)
 
 
 @router.get("/thumbnail")
-async def thumbnail(url: str) -> Response:
+async def thumbnail(url: str, user: User = Depends(auth.get_current_user)) -> Response:
     """[화면] 프로젝트 카드·테스트 목록의 웹 썸네일.
 
     사이트 첫 화면을 서버에서 PNG 로 찍어 준다. 프론트는 <img> 하나로 받으므로
     카드 안에서 무언가 움직일 여지가 없다. 찍지 못하면 404 — 화면이 기본 이미지로
-    떨어진다. DB를 쓰지 않는다.
+    떨어진다. DB를 쓰지 않지만 로그인은 요구한다(connectivity/check와 같은 이유).
     """
     if not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="http(s) 주소만 찍을 수 있어요")
@@ -82,7 +90,7 @@ class MissionAnalyzeIn(BaseModel):
 
 
 @router.post("/missions/analyze")
-def analyze_mission(body: MissionAnalyzeIn) -> dict:
+def analyze_mission(body: MissionAnalyzeIn, user: User = Depends(auth.get_current_user)) -> dict:
     """[화면] 미션 설정 — 문장을 검사하고 성공 기준을 만들어 준다.
 
     DB를 쓰지 않는다. 타이핑 중에도 불러야 하기 때문이다.
@@ -131,6 +139,8 @@ class ProjectCard(BaseModel):
     last_activity_at: dt.datetime
     preview_url: str | None = None
     preview_embeddable: bool = False
+    # 데모용 "지울 수 없는 프로젝트" 개념은 서버에 없다 — 항상 지울 수 있다.
+    removable: bool = True
 
     @field_validator("last_activity_at")
     @classmethod
@@ -148,6 +158,7 @@ class MissionIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=200)
     success_criteria: str
     auto_detect: bool = True
+    expect: str = ""
 
 
 class PersonaSpecIn(BaseModel):
@@ -177,7 +188,9 @@ class TestStats(BaseModel):
 # --------------------------------------------------------------------------- #
 
 @router.get("/projects", response_model=list[ProjectCard])
-def list_projects(session: Session = Depends(get_session)) -> list[ProjectCard]:
+def list_projects(
+    session: Session = Depends(get_session), user: User = Depends(auth.get_current_user)
+) -> list[ProjectCard]:
     rows = session.execute(
         select(
             Project.id,
@@ -189,6 +202,7 @@ def list_projects(session: Session = Depends(get_session)) -> list[ProjectCard]:
             func.coalesce(func.max(Test.created_at), Project.created_at).label("last_activity_at"),
         )
         .outerjoin(Test, Test.project_id == Project.id)
+        .where(Project.user_id == user.id)
         .group_by(Project.id)
         .order_by(func.coalesce(func.max(Test.created_at), Project.created_at).desc())
     ).all()
@@ -197,8 +211,13 @@ def list_projects(session: Session = Depends(get_session)) -> list[ProjectCard]:
 
 
 @router.post("/projects", response_model=ProjectCard, status_code=201)
-def create_project(body: ProjectIn, session: Session = Depends(get_session)) -> ProjectCard:
+def create_project(
+    body: ProjectIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> ProjectCard:
     project = Project(
+        user_id=user.id,
         name=body.name,
         category=body.category,
         source=body.source,
@@ -237,14 +256,41 @@ def create_project(body: ProjectIn, session: Session = Depends(get_session)) -> 
 
 
 # --------------------------------------------------------------------------- #
+# 소유자 확인 헬퍼 — project_id/test_id/run_id로 여는 자리는 전부 이걸 거친다.
+# 존재는 하는데 남의 것이어도 404다 — "있는데 못 봄"과 "아예 없음"을 구분해 주면
+# 남의 프로젝트 id가 유효한지 캐는 데 쓰인다.
+# --------------------------------------------------------------------------- #
+
+def _owned_project(project_id: uuid.UUID, user: User, session: Session) -> Project:
+    project = session.get(Project, project_id)
+    if project is None or project.user_id != user.id:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    return project
+
+
+def _owned_test(test_id: uuid.UUID, user: User, session: Session) -> Test:
+    test = _load_test(test_id, session)
+    _owned_project(test.project_id, user, session)
+    return test
+
+
+def _owned_run(run_id: uuid.UUID, user: User, session: Session) -> Run:
+    run = _load_run(run_id, session)
+    _owned_test(run.test_id, user, session)
+    return run
+
+
+# --------------------------------------------------------------------------- #
 # [화면] 프로젝트 상세
 # --------------------------------------------------------------------------- #
 
 @router.get("/projects/{project_id}")
-def get_project(project_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    project = session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+def get_project(
+    project_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    project = _owned_project(project_id, user, session)
 
     stats = session.execute(
         select(
@@ -282,8 +328,32 @@ def get_project(project_id: uuid.UUID, session: Session = Depends(get_session)) 
     }
 
 
+@router.delete("/projects/{project_id}")
+def delete_project(
+    project_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    """이 자리에서 만든 프로젝트를 지운다.
+
+    데모용 "지울 수 없는 프로젝트" 개념은 프론트 목업에만 있었고 서버 쪽엔 애초에
+    없다(확인함) — 그래서 여기선 항상 지운다. `Project`의 자식 관계가 전부
+    `cascade="all, delete-orphan"`이라(`models.py`) 하나만 지우면 그 아래
+    SiteVariant/Test/Mission/Goal/Persona/Run/Journey/Step 까지 같이 지워진다.
+    """
+    project = _owned_project(project_id, user, session)
+    session.delete(project)
+    session.commit()
+    return {"ok": True}
+
+
 @router.get("/projects/{project_id}/tests", response_model=list[TestStats])
-def list_tests(project_id: uuid.UUID, session: Session = Depends(get_session)) -> list[TestStats]:
+def list_tests(
+    project_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> list[TestStats]:
+    _owned_project(project_id, user, session)
     rows = session.execute(
         select(
             Test.id.label("test_id"),
@@ -320,7 +390,13 @@ def list_tests(project_id: uuid.UUID, session: Session = Depends(get_session)) -
 # --------------------------------------------------------------------------- #
 
 @router.post("/projects/{project_id}/tests", status_code=201)
-def create_test(project_id: uuid.UUID, body: TestIn, session: Session = Depends(get_session)) -> dict:
+def create_test(
+    project_id: uuid.UUID,
+    body: TestIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    _owned_project(project_id, user, session)
     test = Test(project_id=project_id, **body.model_dump())
     session.add(test)
     session.commit()
@@ -328,7 +404,13 @@ def create_test(project_id: uuid.UUID, body: TestIn, session: Session = Depends(
 
 
 @router.put("/tests/{test_id}/mission")
-def upsert_mission(test_id: uuid.UUID, body: MissionIn, session: Session = Depends(get_session)) -> dict:
+def upsert_mission(
+    test_id: uuid.UUID,
+    body: MissionIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    _owned_test(test_id, user, session)
     mission = session.scalar(select(Mission).where(Mission.test_id == test_id))
     if mission is None:
         mission = Mission(test_id=test_id, **body.model_dump())
@@ -336,14 +418,30 @@ def upsert_mission(test_id: uuid.UUID, body: MissionIn, session: Session = Depen
     else:
         for key, value in body.model_dump().items():
             setattr(mission, key, value)
+    session.flush()  # mission.id 확보
+
+    # Goal은 미션당 정확히 1개(idx=0)다. 페르소나마다 다른 목표를 주지 않는다 —
+    # 100명 전원이 이 미션 문장 하나를 좇고, 서로 다른 결과는 특성 조합에서 나온다.
+    # idx!=0 삭제는 옛 방식(목표 11개)의 잔여 행이 남아 있어도 정리되도록 하는 방어책이다.
+    session.execute(delete(Goal).where(Goal.mission_id == mission.id, Goal.idx != 0))
+    goal = session.scalar(select(Goal).where(Goal.mission_id == mission.id, Goal.idx == 0))
+    if goal is None:
+        session.add(Goal(mission_id=mission.id, idx=0, prompt=mission.prompt))
+    else:
+        goal.prompt = mission.prompt
+
     session.commit()
     return {"id": mission.id}
 
 
 @router.put("/tests/{test_id}/persona-specs")
 def replace_persona_specs(
-    test_id: uuid.UUID, body: list[PersonaSpecIn], session: Session = Depends(get_session)
+    test_id: uuid.UUID,
+    body: list[PersonaSpecIn],
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
 ) -> dict:
+    _owned_test(test_id, user, session)
     existing = {
         s.age_band: s
         for s in session.scalars(select(PersonaSpec).where(PersonaSpec.test_id == test_id))
@@ -361,7 +459,12 @@ def replace_persona_specs(
 
 
 @router.post("/tests/{test_id}/personas/assemble")
-def build_personas(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
+def build_personas(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    _owned_test(test_id, user, session)
     try:
         personas = assemble(session, test_id)
     except PersonaBuildError as exc:
@@ -370,7 +473,6 @@ def build_personas(test_id: uuid.UUID, session: Session = Depends(get_session)) 
     session.commit()
     return {
         "count": len(personas),
-        "unique_pairs": len({(p.trait_combo_id, p.goal_id) for p in personas}),
         # 이 수가 0이면 D-26(10초 팝업)은 '못 잡은 것'이 아니라 '마주친 적 없는 것'이 된다.
         "popup_reachable": popup_reachable_count(personas),
     }
@@ -381,10 +483,12 @@ def build_personas(test_id: uuid.UUID, session: Session = Depends(get_session)) 
 # --------------------------------------------------------------------------- #
 
 @router.get("/tests/{test_id}/review")
-def review(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    test = session.get(Test, test_id)
-    if test is None:
-        raise HTTPException(status_code=404, detail="테스트를 찾을 수 없습니다")
+def review(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    test = _owned_test(test_id, user, session)
 
     mission = session.scalar(select(Mission).where(Mission.test_id == test_id))
     specs = list(session.scalars(select(PersonaSpec).where(PersonaSpec.test_id == test_id)))
@@ -408,6 +512,7 @@ def review(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
         "mission": None if mission is None else {
             "prompt": mission.prompt,
             "success_criteria": mission.success_criteria,
+            "expect": mission.expect,
         },
         "personas": {
             "total": persona_count,
@@ -435,34 +540,63 @@ def review(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
 # --------------------------------------------------------------------------- #
 
 @router.post("/tests/{test_id}/runs", status_code=201)
-def start_run(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
+def start_run(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
     """[화면] 확인의 '테스트 하기'.
 
-    실제 탐색은 파이프라인(run.py)이 돌린다. 여기서는 실행 한 건을 열고
-    페르소나별 여정 자리를 만들어 둘 뿐이다 — 진행률은 그 여정들이 채워진다.
+    실행 한 건을 열고 페르소나별 여정 자리를 만든 뒤, 별도 스레드에서 실제 탐색
+    파이프라인(agent-ux/run.py)을 돌린다(`orchestrate.start_pipeline_run`) — 진행률은
+    그 스레드가 채우는 Journey들로 `/runs/active`에 드러난다. 응답은 파이프라인이
+    끝나길 기다리지 않고 바로 나간다.
     """
-    test = session.get(Test, test_id)
-    if test is None:
-        raise HTTPException(status_code=404, detail="테스트를 찾을 수 없습니다")
+    test = _owned_test(test_id, user, session)
 
     try:
         personas = assemble(session, test_id)
     except PersonaBuildError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    variant = session.scalar(
+    flawed = session.scalar(
         select(SiteVariant).where(
             SiteVariant.project_id == test.project_id, SiteVariant.is_control.is_(False)
         )
     )
-    if variant is None:
+    if flawed is None:
         raise HTTPException(status_code=422, detail="결함판 변형이 없습니다")
+    clean = session.scalar(
+        select(SiteVariant).where(
+            SiteVariant.project_id == test.project_id, SiteVariant.is_control.is_(True)
+        )
+    )
 
-    # 화면에서 시작하는 실행은 A(결함판 + 지도)다. 나머지 B/C/D는 검증 계획용이라
-    # 파이프라인이 따로 연다. 같은 팔을 두 번 열면 어느 쪽이 발표 수치인지 알 수 없다.
-    run = session.scalar(select(Run).where(Run.test_id == test_id, Run.arm == "A"))
+    # 화면에서 시작하는 실행은 A(결함판)다. B(정상판)는 대조군 — 같은 100명을
+    # 그대로 다시 돌려서, 결과 화면의 baseline(정상판)/compare(결함판)를 채운다.
+    # 같은 팔을 두 번 열면 어느 쪽이 발표 수치인지 알 수 없어서 arm은 고정한다.
+    run_a = _open_run(session, test_id, "A", flawed.id, personas)
+    run_b = _open_run(session, test_id, "B", clean.id, personas) if clean else None
+
+    session.commit()
+
+    threading.Thread(target=orchestrate.start_pipeline_run, args=(run_a.id,), daemon=True).start()
+    if run_b is not None:
+        threading.Thread(
+            target=orchestrate.start_pipeline_run, args=(run_b.id,), daemon=True
+        ).start()
+
+    return {"run_id": str(run_a.id), "persona_count": run_a.persona_count, "status": run_a.status}
+
+
+def _open_run(
+    session: Session, test_id: uuid.UUID, arm: str, site_variant_id: uuid.UUID,
+    personas: list[Persona],
+) -> Run:
+    """arm 하나를 열고(있으면 재사용) 페르소나별 여정 자리를 만든다. 커밋은 호출부가 한다."""
+    run = session.scalar(select(Run).where(Run.test_id == test_id, Run.arm == arm))
     if run is None:
-        run = Run(test_id=test_id, site_variant_id=variant.id, arm="A", map_enabled=False)
+        run = Run(test_id=test_id, site_variant_id=site_variant_id, arm=arm, map_enabled=False)
         session.add(run)
 
     run.persona_count = len(personas)
@@ -480,18 +614,23 @@ def start_run(test_id: uuid.UUID, session: Session = Depends(get_session)) -> di
         if persona.id not in existing:
             session.add(Journey(run_id=run.id, persona_id=persona.id))
 
-    session.commit()
-    return {"run_id": str(run.id), "persona_count": run.persona_count, "status": run.status}
+    return run
 
 
 @router.get("/runs/active")
-def active_run(session: Session = Depends(get_session)) -> dict | None:
-    """[화면] 진행중 배너. 돌고 있는 실행이 없으면 null 을 준다."""
+def active_run(
+    session: Session = Depends(get_session), user: User = Depends(auth.get_current_user)
+) -> dict | None:
+    """[화면] 진행중 배너. 돌고 있는 실행이 없으면 null 을 준다.
+
+    내가 소유한 프로젝트에서 도는 실행만 본다 — 안 그러면 남이 지금 뭘 테스트
+    중인지가 진행률 배너로 새어 나간다.
+    """
     row = session.execute(
         select(Run, Test, Project)
         .join(Test, Test.id == Run.test_id)
         .join(Project, Project.id == Test.project_id)
-        .where(Run.status == "running")
+        .where(Run.status == "running", Project.user_id == user.id)
         .order_by(Run.started_at.desc())
         .limit(1)
     ).first()
@@ -500,11 +639,19 @@ def active_run(session: Session = Depends(get_session)) -> dict | None:
         return None
 
     run, test, project = row
+
+    # clean(A)/flawed(B) 실행이 거의 동시에 돈다 — 같은 test의 running 행을 다
+    # 합쳐서 보여준다. 안 그러면 나중에 시작한 쪽 진행률만 반쪽으로 보인다.
+    running_runs = list(
+        session.scalars(select(Run).where(Run.test_id == test.id, Run.status == "running"))
+    )
+    run_ids = [r.id for r in running_runs]
     done = session.scalar(
         select(func.count(Journey.id)).where(
-            Journey.run_id == run.id, Journey.finished_at.is_not(None)
+            Journey.run_id.in_(run_ids), Journey.finished_at.is_not(None)
         )
     ) or 0
+    total = sum(r.persona_count for r in running_runs)
 
     return {
         "run_id": str(run.id),
@@ -512,7 +659,7 @@ def active_run(session: Session = Depends(get_session)) -> dict | None:
         "project_name": project.name,
         "test_name": test.name,
         "done": done,
-        "total": run.persona_count,
+        "total": total,
     }
 
 
@@ -527,30 +674,52 @@ def _load_test(test_id: uuid.UUID, session: Session) -> Test:
     return test
 
 
+def _primary_run(test_id: uuid.UUID, session: Session) -> Run | None:
+    """이 테스트의 '탐색 대상' 실행(결함판, arm A). 화면이 기본으로 보는 결과다."""
+    return session.scalar(select(Run).where(Run.test_id == test_id, Run.arm == "A"))
+
+
+def _control_run(test_id: uuid.UUID, session: Session) -> Run | None:
+    """이 테스트의 대조군 실행(정상판, arm B). 아직 안 돌렸으면 None."""
+    return session.scalar(select(Run).where(Run.test_id == test_id, Run.arm == "B"))
+
+
 @router.get("/tests/{test_id}")
-def test_detail(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    """상단 제목 · 미션 문장 · 지표 세 칸."""
-    test = _load_test(test_id, session)
+def test_detail(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    """상단 제목 · 미션 문장 · 지표 세 칸.
+
+    A(결함판) 실행 하나만 본다 — B(정상판)까지 합치면 두 변형의 여정이 섞여
+    성공률·다이어그램이 다 틀어진다(정상판은 대조군일 뿐 탐색 대상이 아니다).
+    """
+    test = _owned_test(test_id, user, session)
     project = session.get(Project, test.project_id)
     mission = session.scalar(select(Mission).where(Mission.test_id == test_id))
+    primary = _primary_run(test_id, session)
 
-    stats = session.execute(
-        select(
-            func.count(Journey.id).label("journeys"),
-            func.count(Journey.id).filter(Journey.goal_achieved.is_(True)).label("achieved"),
-            func.count(Journey.id)
-            .filter(Journey.termination_reason.in_(DROP_REASONS))
-            .label("dropped"),
-            func.avg(Journey.step_count)
-            .filter(Journey.goal_achieved.is_(True))
-            .label("success_steps"),
-        )
-        .select_from(Journey)
-        .join(Run, Run.id == Journey.run_id)
-        .where(Run.test_id == test_id)
-    ).one()
+    stats = (
+        session.execute(
+            select(
+                func.count(Journey.id).label("journeys"),
+                func.count(Journey.id).filter(Journey.goal_achieved.is_(True)).label("achieved"),
+                func.count(Journey.id)
+                .filter(Journey.termination_reason.in_(DROP_REASONS))
+                .label("dropped"),
+                func.avg(Journey.step_count)
+                .filter(Journey.goal_achieved.is_(True))
+                .label("success_steps"),
+            )
+            .select_from(Journey)
+            .where(Journey.run_id == primary.id)
+        ).one()
+        if primary is not None
+        else None
+    )
 
-    journeys = stats.journeys or 0
+    journeys = stats.journeys if stats else 0
     persona_total = session.scalar(
         select(func.count(Persona.id)).where(Persona.test_id == test_id)
     ) or 0
@@ -568,21 +737,27 @@ def test_detail(test_id: uuid.UUID, session: Session = Depends(get_session)) -> 
         "mission": None if mission is None else {
             "prompt": mission.prompt,
             "success_criteria": mission.success_criteria,
+            "expect": mission.expect,
         },
         "persona_total": persona_total,
         "journey_count": journeys,
         # 여정이 없으면 0% 가 아니라 '아직 없음'이다 — 프로젝트 상세와 같은 규칙.
         "success_rate": round(100 * stats.achieved / journeys, 1) if journeys else None,
         "drop_rate": round(100 * stats.dropped / journeys, 1) if journeys else None,
-        "avg_success_steps": round(float(stats.success_steps), 2) if stats.success_steps else None,
+        "avg_success_steps": round(float(stats.success_steps), 2) if stats and stats.success_steps else None,
     }
 
 
 @router.get("/tests/{test_id}/paths")
-def test_paths(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
+def test_paths(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
     """'경로' 보기. 성공/이탈 두 묶음을 한 번에 준다 — 탭을 눌러도 다시 부르지 않는다."""
-    _load_test(test_id, session)
-    walks = load_walks(session, test_id)
+    _owned_test(test_id, user, session)
+    primary = _primary_run(test_id, session)
+    walks = load_walks(session, None, run_id=primary.id) if primary else []
     counts = outcome_counts(walks)
     total = len(walks)
 
@@ -602,18 +777,156 @@ def test_paths(test_id: uuid.UUID, session: Session = Depends(get_session)) -> d
 
 
 @router.get("/tests/{test_id}/diagram")
-def test_diagram(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
+def test_diagram(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
     """'다이어그램' 보기. 같은 여정을 단계 × 화면으로 펼친다."""
-    _load_test(test_id, session)
-    return build_diagram(load_walks(session, test_id))
+    _owned_test(test_id, user, session)
+    primary = _primary_run(test_id, session)
+    return build_diagram(load_walks(session, None, run_id=primary.id) if primary else [])
 
 
 @router.get("/tests/{test_id}/personas")
-def test_personas(test_id: uuid.UUID, session: Session = Depends(get_session)) -> dict:
-    """사이드바 '페르소나' 탭."""
-    _load_test(test_id, session)
-    rows = persona_rows(session, test_id, load_walks(session, test_id))
-    return {"total": len(rows), "items": rows}
+def test_personas(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    """사이드바 '페르소나' 탭. 정상판(baseline)과 결함판(compare)을 나란히 준다."""
+    _owned_test(test_id, user, session)
+    primary = _primary_run(test_id, session)
+    if primary is None:
+        return {"total": 0, "items": []}
+    control = _control_run(test_id, session)
+    return compared_persona_rows(session, control, primary)
+
+
+@router.get("/tests/{test_id}/steps")
+def test_steps(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    """막대를 눌렀을 때 뜨는 스텝 상세 + 필름스트립."""
+    test = _owned_test(test_id, user, session)
+    primary = _primary_run(test_id, session)
+    walks = load_walks(session, None, run_id=primary.id) if primary else []
+    return build_steps_payload(walks, test.name)
+
+
+# --------------------------------------------------------------------------- #
+# 방금 로컬에서 돌린 실행(run_id 기준) — 테스트로 저장되기 전에도 결과를 본다
+# --------------------------------------------------------------------------- #
+
+def _load_run(run_id: uuid.UUID, session: Session) -> Run:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="실행을 찾을 수 없습니다")
+    return run
+
+
+def _sibling_run(run: Run, session: Session) -> Run | None:
+    """짝인 반대 변형 실행. A(결함판)면 B(정상판)를, B면 A를 찾는다."""
+    other_arm = "B" if run.arm == "A" else "A"
+    return session.scalar(select(Run).where(Run.test_id == run.test_id, Run.arm == other_arm))
+
+
+@router.get("/live/{run_id}")
+def live_detail(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    run = _owned_run(run_id, user, session)
+    return test_detail(run.test_id, session, user)
+
+
+@router.get("/live/{run_id}/paths")
+def live_paths(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    run = _owned_run(run_id, user, session)
+    walks = load_walks(session, None, run_id=run.id)
+    counts = outcome_counts(walks)
+    total = len(walks)
+
+    def share(kind: str) -> dict:
+        count = counts.get(kind, 0)
+        return {"count": count, "percent": round(100 * count / total) if total else 0}
+
+    return {
+        "total": total,
+        "success": share("success"),
+        "drop": share("drop"),
+        "paths": {"success": group_paths(walks, "success"), "drop": group_paths(walks, "drop")},
+    }
+
+
+@router.get("/live/{run_id}/diagram")
+def live_diagram(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    run = _owned_run(run_id, user, session)
+    return build_diagram(load_walks(session, None, run_id=run.id))
+
+
+@router.get("/live/{run_id}/personas")
+def live_personas(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    run = _owned_run(run_id, user, session)
+    sibling = _sibling_run(run, session)
+    if run.arm == "A":
+        return compared_persona_rows(session, sibling, run)
+    if sibling is None:
+        return {"total": 0, "items": []}
+    return compared_persona_rows(session, run, sibling)
+
+
+@router.get("/live/{run_id}/steps")
+def live_steps(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    run = _owned_run(run_id, user, session)
+    test = _load_test(run.test_id, session)
+    return build_steps_payload(load_walks(session, None, run_id=run.id), test.name)
+
+
+@router.post("/runs/{run_id}/score")
+async def score_run(
+    run_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    """정적 분석 채점기(20건)를 돌려 Finding/FindingMatch를 채우고 집계한다.
+
+    화면 계약은 아직 없다 — `/tests/{id}/ablation`이 이미 RunScore를 읽으므로,
+    채점이 끝나면 그 화면에 자동으로 숫자가 뜬다.
+    """
+    _owned_run(run_id, user, session)
+    summary = await static_scan.run_static_scan(session, run_id)
+    score = summary.score
+    session.commit()
+    return {
+        "findings": summary.hits,
+        "matched": summary.matched,
+        "unmatched": summary.unmatched,
+        "defects_found": score.defects_found,
+        "defects_total": score.defects_total,
+        "recall": float(score.recall) if score.recall is not None else None,
+        "precision": float(score.precision) if score.precision is not None else None,
+        "fp_rate": float(score.fp_rate) if score.fp_rate is not None else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -621,7 +934,12 @@ def test_personas(test_id: uuid.UUID, session: Session = Depends(get_session)) -
 # --------------------------------------------------------------------------- #
 
 @router.get("/tests/{test_id}/ablation")
-def ablation(test_id: uuid.UUID, session: Session = Depends(get_session)) -> list[dict]:
+def ablation(
+    test_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> list[dict]:
+    _owned_test(test_id, user, session)
     rows = session.execute(
         select(Run.arm, SiteVariant.key, Run.map_enabled, Run.status, RunScore)
         .join(SiteVariant, SiteVariant.id == Run.site_variant_id)
@@ -642,3 +960,221 @@ def ablation(test_id: uuid.UUID, session: Session = Depends(get_session)) -> lis
         }
         for arm, variant, map_enabled, status, score in rows
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 계정 인증 (회원가입 / 로그인)
+#
+# 1단계: 인증 자체만. Project/Test를 사용자별로 나누는 것(소유권)은 다음 단계 —
+# 그래서 여기서 발급한 토큰을 기존 화면들이 아직 쓰지는 않는다.
+# --------------------------------------------------------------------------- #
+
+@router.post("/auth/signup", status_code=201)
+def signup(body: auth.SignupIn, session: Session = Depends(get_session)) -> dict:
+    existing = session.scalar(select(User).where(User.email == body.email))
+    if existing is not None:
+        raise HTTPException(status_code=400, detail="이미 가입된 이메일입니다.")
+
+    user = User(email=body.email, password_hash=auth.hash_password(body.password), name=body.name)
+    session.add(user)
+    session.commit()
+    return {"token": auth.create_token(user.id), "user": auth.user_out(user)}
+
+
+@router.post("/auth/login")
+def login(body: auth.LoginIn, session: Session = Depends(get_session)) -> dict:
+    user = session.scalar(select(User).where(User.email == body.email.strip().lower()))
+    if user is None or not auth.verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+    return {"token": auth.create_token(user.id), "user": auth.user_out(user)}
+
+
+@router.get("/auth/me")
+def me(user: User = Depends(auth.get_current_user)) -> dict:
+    return auth.user_out(user)
+
+
+# --------------------------------------------------------------------------- #
+# 계정 · 플랜 · 크레딧 (설정 / 크레딧 및 플랜 화면)
+#
+# 결제 시스템은 이 저장소엔 없다(deploy/README.md도 이미 인정한 부분). 없는 걸
+# 있는 척 흉내 내지 않고, 고정값만 정직하게 돌려준다. /account는 이제 실제
+# 로그인한 사용자를 돌려주고(1단계에서 미뤄뒀던 부분), 크레딧 잔액은
+# "이 사용자 소유 프로젝트에서 지금까지 만든 페르소나 총합"으로 채운다 —
+# 시스템 전체가 아니라 내 것만 세야 소유권 분리와 앞뒤가 맞는다.
+# --------------------------------------------------------------------------- #
+
+def _account_out(user: User) -> dict:
+    return {
+        "name": user.name, "initial": user.name[:1], "workspace": user.workspace,
+        "email": user.email, "plan_label": "무료",
+    }
+
+
+class AccountIn(BaseModel):
+    name: str = Field(min_length=1, max_length=50)
+    workspace: str = Field(min_length=1, max_length=100)
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, value: str) -> str:
+        return auth.normalize_email(value)
+
+
+@router.get("/account")
+def get_account(user: User = Depends(auth.get_current_user)) -> dict:
+    return _account_out(user)
+
+
+@router.put("/account")
+def update_account(
+    body: AccountIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    if body.email != user.email:
+        existing = session.scalar(select(User).where(User.email == body.email))
+        if existing is not None:
+            raise HTTPException(status_code=400, detail="이미 사용 중인 이메일입니다.")
+
+    user.name = body.name
+    user.workspace = body.workspace
+    user.email = body.email
+    session.commit()
+    return _account_out(user)
+
+
+def _my_persona_count(session: Session, user: User) -> int:
+    return session.scalar(
+        select(func.count(Persona.id))
+        .join(Test, Test.id == Persona.test_id)
+        .join(Project, Project.id == Test.project_id)
+        .where(Project.user_id == user.id)
+    ) or 0
+
+
+@router.get("/billing/plan")
+def get_plan(
+    session: Session = Depends(get_session), user: User = Depends(auth.get_current_user)
+) -> dict:
+    used = _my_persona_count(session, user)
+    return {
+        "current": {
+            "name": "무료", "price_label": "₩0/월", "next_billing_at": "",
+            "used": used, "quota": 0,
+        },
+        "features": [],
+        "upgrade": {
+            "badge": "", "title": "", "body": "결제 시스템이 아직 연결되지 않았습니다.",
+            "cta": "", "note": "",
+        },
+    }
+
+
+@router.get("/billing/credits")
+def get_credits(
+    session: Session = Depends(get_session), user: User = Depends(auth.get_current_user)
+) -> dict:
+    used = _my_persona_count(session, user)
+    return {
+        "balance": 0, "used_this_month": used, "rules": [], "packs": [], "history": [],
+    }
+
+
+@router.get("/billing/tiers")
+def get_plan_tiers(user: User = Depends(auth.get_current_user)) -> dict:
+    return {"tiers": [], "packs": []}
+
+
+# --------------------------------------------------------------------------- #
+# 두 프로젝트 비교(A/B)
+# --------------------------------------------------------------------------- #
+
+class AbIn(BaseModel):
+    name: str
+    a_project_id: uuid.UUID
+    b_project_id: uuid.UUID
+
+
+def _ab_card(row: AbTest, user: User, session: Session) -> dict | None:
+    # 내 프로젝트끼리 짝지은 것만 보여준다 — a/b 둘 다 내 것이어야 한다.
+    a_project = session.get(Project, row.a_project_id)
+    b_project = session.get(Project, row.b_project_id)
+    if a_project is None or b_project is None:
+        return None
+    if a_project.user_id != user.id or b_project.user_id != user.id:
+        return None
+    test_a = ab.latest_test_with_results(session, row.a_project_id)
+    mission = session.scalar(select(Mission).where(Mission.test_id == test_a.id)) if test_a else None
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "mission": mission.prompt if mission else "",
+        "created_at": _as_utc(row.created_at),
+        "a": {"id": str(a_project.id), "name": a_project.name, "preview_url": a_project.preview_url},
+        "b": {"id": str(b_project.id), "name": b_project.name, "preview_url": b_project.preview_url},
+    }
+
+
+@router.get("/ab")
+def list_ab(
+    session: Session = Depends(get_session), user: User = Depends(auth.get_current_user)
+) -> dict:
+    rows = list(session.scalars(select(AbTest).order_by(AbTest.created_at.desc())))
+    items = [card for row in rows if (card := _ab_card(row, user, session)) is not None]
+    return {"items": items}
+
+
+@router.post("/ab")
+def create_ab(
+    body: AbIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    a_project = session.get(Project, body.a_project_id)
+    b_project = session.get(Project, body.b_project_id)
+    if a_project is None or b_project is None:
+        return {"error": "비교할 프로젝트 두 개를 골라주세요."}
+    if a_project.user_id != user.id or b_project.user_id != user.id:
+        # 남의 프로젝트를 짝짓게 두지 않는다 — 존재 여부도 굳이 알려주지 않는다.
+        return {"error": "비교할 프로젝트 두 개를 골라주세요."}
+
+    row = AbTest(name=body.name, a_project_id=body.a_project_id, b_project_id=body.b_project_id)
+    session.add(row)
+    session.commit()
+    return {"id": str(row.id)}
+
+
+@router.get("/ab/{ab_id}")
+def get_ab(
+    ab_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(auth.get_current_user),
+) -> dict:
+    row = session.get(AbTest, ab_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="비교를 찾을 수 없습니다")
+
+    a_project = session.get(Project, row.a_project_id)
+    b_project = session.get(Project, row.b_project_id)
+    if a_project is None or b_project is None:
+        return {"ok": False, "message": "비교하던 프로젝트가 사라졌어요."}
+    if a_project.user_id != user.id or b_project.user_id != user.id:
+        raise HTTPException(status_code=404, detail="비교를 찾을 수 없습니다")
+
+    test_a = ab.latest_test_with_results(session, row.a_project_id)
+    test_b = ab.latest_test_with_results(session, row.b_project_id)
+    mission = session.scalar(select(Mission).where(Mission.test_id == test_a.id)) if test_a else None
+
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "mission": mission.prompt if mission else "",
+        "created_at": _as_utc(row.created_at),
+        "a": ab.project_side(session, row.a_project_id, test_a),
+        "b": ab.project_side(session, row.b_project_id, test_b),
+        "compare": ab.compare_projects(session, test_a, test_b),
+        "diagrams": ab.ab_diagrams(session, test_a, test_b),
+        "steps": ab.ab_steps(session, test_a, test_b),
+    }

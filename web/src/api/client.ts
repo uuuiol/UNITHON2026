@@ -1,3 +1,4 @@
+import { clearToken, getToken } from '../lib/authToken'
 import { MOCK_MISS, mockResponse } from './mock'
 
 const BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
@@ -35,15 +36,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
+  const token = getToken()
+  const headers: Record<string, string> = {}
+  if (init?.body) headers['Content-Type'] = 'application/json'
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`, {
-      headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
       ...init,
+      headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
     })
   } catch {
     // 서버가 안 떠 있는 경우와 서버가 에러를 준 경우는 사용자가 할 일이 다르다.
     throw new ApiError(`API 서버(${BASE})에 닿지 못했어요. 백엔드가 떠 있는지 확인해 주세요.`, 0)
+  }
+
+  if (response.status === 401) {
+    // 토큰이 없거나 만료됐다. 지워 두면 라우트 가드가 알아서 로그인 화면으로 보낸다.
+    clearToken()
   }
 
   if (!response.ok) {
@@ -57,6 +68,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T
   return response.json()
 }
+
+// --------------------------------------------------------------------------- //
+// 인증
+// --------------------------------------------------------------------------- //
+
+export type AuthResult = {
+  token: string
+  user: { id: string; email: string; name: string; workspace: string }
+}
+
+export const signup = (email: string, password: string, name: string) =>
+  request<AuthResult>('/api/auth/signup', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, name }),
+  })
+
+export const login = (email: string, password: string) =>
+  request<AuthResult>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  })
 
 // --------------------------------------------------------------------------- //
 // 연결 검사
@@ -375,6 +407,8 @@ export type StepDot = { x: number; y: number; wasted: boolean }
 
 export type StepPersona = {
   id: string
+  /** "P001" 형식 짧은 코드. "번호" 표시 모드는 id(UUID)가 아니라 이걸 쓴다. */
+  code: string
   label: string
   traits: Record<string, number>
   /** 사용자가 화면에서 정하는 값. 행동 규칙은 traits 가 정한다. */
@@ -635,6 +669,10 @@ export type PlanTier = {
 export type CreditPack = { credits: number; price: string }
 
 export const getAccount = () => request<Account>('/api/account')
+
+export function updateAccount(body: { name: string; workspace: string; email: string }) {
+  return request<Account>('/api/account', { method: 'PUT', body: JSON.stringify(body) })
+}
 export const getPlan = () => request<PlanPayload>('/api/billing/plan')
 export const getCredits = () => request<CreditsPayload>('/api/billing/credits')
 export const getPlanTiers = () =>

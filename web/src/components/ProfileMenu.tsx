@@ -2,15 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import chevronDownIcon from '../assets/icons/chevron-down.svg'
 import avatar from '../assets/img/avatar.png'
+import { clearToken } from '../lib/authToken'
 
 /**
  * 사이드바 맨 아래 프로필. 누르면 계정 메뉴가 열린다.
  *
  * 전역 사이드바와 테스트 상세 사이드바가 같은 블록을 쓴다 — 둘로 나눠 두면
  * 한쪽에만 메뉴가 달려서 "여기선 되는데 저기선 안 되는" 상태가 된다.
- *
- * 로그아웃은 아직 지울 세션이 없다(인증 미연결). 로그인 화면으로 되돌리는 것까지가
- * 지금 할 수 있는 전부이고, 진짜 세션이 붙는 자리는 `signOut()` 한 곳이다.
  */
 export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
   const navigate = useNavigate()
@@ -42,6 +40,7 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
 
   const signOut = () => {
     setOpen(false)
+    clearToken()
     navigate('/login')
   }
 

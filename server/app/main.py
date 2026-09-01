@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,9 +16,18 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="AI 페르소나 UX 테스트 API", version="0.1.0", lifespan=lifespan)
 
+# 기본값은 로컬 Vite 개발 서버. 배포판(프론트가 다른 오리진 — 예: Amplify)에서는
+# CORS_ORIGINS 환경변수(콤마 구분)로 실제 프론트 주소를 넣는다.
+_default_origins = "http://localhost:5173,http://localhost:5180"
+allow_origins = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", _default_origins).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5180"],  # Vite 개발 서버
+    allow_origins=allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

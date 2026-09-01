@@ -51,12 +51,26 @@ CREATE TYPE llm_modality       AS ENUM ('text', 'vision');
 
 
 -- =============================================================================
+-- 0b. 계정 — project가 이걸 참조하므로 먼저 만든다.
+-- =============================================================================
+
+CREATE TABLE "user" (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    email         text NOT NULL UNIQUE,
+    password_hash text NOT NULL,
+    name          text NOT NULL,
+    workspace     text NOT NULL DEFAULT '내 워크스페이스',
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+-- =============================================================================
 -- 1. 제품 계층 — Figma 화면과 1:1
 -- =============================================================================
 
 -- [화면] 프로젝트 목록 / 새 프로젝트
 CREATE TABLE project (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id       uuid NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
     name          text        NOT NULL,
     category      text        NOT NULL,
     source        source_type NOT NULL DEFAULT 'web_link',
@@ -117,6 +131,7 @@ CREATE TABLE mission (
     prompt           text NOT NULL,
     success_criteria text NOT NULL,
     auto_detect      boolean NOT NULL DEFAULT true,   -- UI의 "자동" 배지
+    expect           text NOT NULL DEFAULT '',        -- "달성으로 인정할 근거 문구" (run.py --expect)
     created_at       timestamptz NOT NULL DEFAULT now(),
 
     -- UI 카운터가 200자다. 잘린 미션이 조용히 저장되면 100명이 다른 일을 한다.
@@ -191,10 +206,9 @@ CREATE TABLE persona (
     dwell_ms       integer NOT NULL,
     max_steps      integer NOT NULL,
 
-    UNIQUE (test_id, code),
-    -- 기획서가 요구하는 "고유 쌍 100/100"을 DB가 강제한다.
-    -- 중복 쌍이 들어가면 1명이 찾은 것을 여러 번 세게 되고 재현율이 부풀려진다.
-    UNIQUE (test_id, trait_combo_id, goal_id)
+    UNIQUE (test_id, code)
+    -- (trait_combo_id, goal_id) 고유 제약은 없앴다 — goal이 미션당 1개로 고정되면서
+    -- 특성 조합이 100명 안에서 반복되는 게 정상 동작이 됐다 (server/app/personas.py 참고).
 );
 CREATE INDEX ON persona (test_id);
 
@@ -470,6 +484,21 @@ CREATE TABLE llm_call (
         CHECK (stage <> 'explore' OR modality = 'text')
 );
 CREATE INDEX ON llm_call (run_id, stage, modality);
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- 7. 두 프로젝트 비교(A/B) — 한 프로젝트 안의 clean/flawed 변형과는 다르다.
+-- 예: 리뉴얼 전 사이트(a) vs 리뉴얼 후 사이트(b). 비교 시점의 결과는 그때그때
+-- 각 프로젝트의 가장 최근 실행에서 읽는다 — 이 표는 짝짓기만 기억한다.
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE ab_test (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name         text NOT NULL,
+    a_project_id uuid NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    b_project_id uuid NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ON ab_test (a_project_id);
+CREATE INDEX ON ab_test (b_project_id);
 
 
 -- =============================================================================

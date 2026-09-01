@@ -77,6 +77,7 @@ class Project(Base):
     __tablename__ = "project"
 
     id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(SourceType, default="web_link")
@@ -139,6 +140,9 @@ class Mission(Base):
     prompt: Mapped[str] = mapped_column(Text)
     success_criteria: Mapped[str] = mapped_column(Text)
     auto_detect: Mapped[bool] = mapped_column(Boolean, default=True)
+    #: [화면] "달성으로 인정할 근거 문구". 비어 있으면 페르소나 본인 주장만으로 달성 처리한다
+    #: (run.py --expect). 화면엔 이미 입력창이 있었는데 저장할 컬럼이 없어서 버려지고 있었다.
+    expect: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     test: Mapped[Test] = relationship(back_populates="mission")
@@ -218,8 +222,8 @@ class Persona(Base):
     __tablename__ = "persona"
     __table_args__ = (
         UniqueConstraint("test_id", "code"),
-        # 고유 쌍 100/100 — 중복이 들어오면 1명이 찾은 것을 여러 번 세게 된다.
-        UniqueConstraint("test_id", "trait_combo_id", "goal_id"),
+        # (trait_combo_id, goal_id) 고유 제약은 없앴다 — goal이 미션당 1개로 고정되면서
+        # 특성 조합이 100명 안에서 반복되는 게 정상 동작이 됐다 (server/app/personas.py 참고).
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -486,4 +490,42 @@ class LlmCall(Base):
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=0)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --------------------------------------------------------------------------- #
+# 7. 두 프로젝트 비교(A/B)
+# --------------------------------------------------------------------------- #
+
+class AbTest(Base):
+    """서로 다른 두 프로젝트를 통째로 견준다 (한 프로젝트 안의 clean/flawed 변형과는 다르다).
+
+    예: 리뉴얼 전 사이트(a)와 리뉴얼 후 사이트(b). 비교 시점엔 각자의 가장 최근 실행
+    결과를 그때그때 읽는다 — 이 테이블은 "무엇과 무엇을 짝지었는가"만 기억한다.
+    """
+
+    __tablename__ = "ab_test"
+
+    id: Mapped[uuid.UUID] = _pk()
+    name: Mapped[str] = mapped_column(Text)
+    a_project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"))
+    b_project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    a_project: Mapped[Project] = relationship(foreign_keys=[a_project_id])
+    b_project: Mapped[Project] = relationship(foreign_keys=[b_project_id])
+
+
+# --------------------------------------------------------------------------- #
+# 8. 계정
+# --------------------------------------------------------------------------- #
+
+class User(Base):
+    __tablename__ = "user"
+
+    id: Mapped[uuid.UUID] = _pk()
+    email: Mapped[str] = mapped_column(Text, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    workspace: Mapped[str] = mapped_column(Text, default="내 워크스페이스")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

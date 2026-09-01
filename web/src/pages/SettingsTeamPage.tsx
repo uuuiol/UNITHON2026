@@ -1,17 +1,13 @@
 import { useEffect, useState } from 'react'
-import { getAccount } from '../api/client'
-import { useQuery } from '../api/hooks'
+import { getAccount, updateAccount } from '../api/client'
+import { useMutation, useQuery } from '../api/hooks'
 import { SettingsCard, SettingsLayout } from '../components/SettingsLayout'
 import { ErrorBlock, LoadingBlock } from '../components/StateView'
 
-/**
- * 설정 · 팀 설정 (Figma 311:21271).
- *
- * 저장은 아직 갈 곳이 없다. 누르면 저장한 척하지 않고, 저장할 수 없다는 사실을
- * 그 자리에서 말한다 — 눌렀는데 아무 일도 없으면 고장으로 읽힌다.
- */
+/** 설정 · 팀 설정 (Figma 311:21271). */
 export function SettingsTeamPage() {
   const account = useQuery(getAccount, [])
+  const save = useMutation(updateAccount)
 
   const [name, setName] = useState('')
   const [workspace, setWorkspace] = useState('')
@@ -68,13 +64,25 @@ export function SettingsTeamPage() {
           />
 
           <div className="mt-[24px] flex items-center justify-end gap-[16px]">
-            {notice ? <p className="text-[13px] text-muted">{notice}</p> : null}
+            {save.error ? (
+              <p className="text-[13px] font-medium text-danger">{save.error}</p>
+            ) : notice ? (
+              <p className="text-[13px] text-muted">{notice}</p>
+            ) : null}
             <button
               type="button"
-              onClick={() => setNotice('아직 저장할 곳이 없어요. 계정 서버가 붙으면 바로 저장돼요.')}
-              className="h-[50px] w-[200px] rounded-[10px] bg-main text-[16px] font-semibold text-white transition-colors hover:bg-[#2872dd]"
+              disabled={save.pending}
+              onClick={async () => {
+                setNotice(null)
+                const result = await save.run({ name, workspace, email })
+                if (result) {
+                  setNotice('저장했어요.')
+                  account.reload()
+                }
+              }}
+              className="h-[50px] w-[200px] rounded-[10px] bg-main text-[16px] font-semibold text-white transition-colors hover:bg-[#2872dd] disabled:opacity-60"
             >
-              변경사항 저장
+              {save.pending ? '저장 중...' : '변경사항 저장'}
             </button>
           </div>
         </SettingsCard>

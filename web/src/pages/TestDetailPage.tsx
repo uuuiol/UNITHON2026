@@ -449,9 +449,9 @@ function PersonaView({ testId }: { testId: string }) {
               >
                 <td className="px-[18px] py-[12px]">
                   <div className="flex items-center gap-[10px]">
-                    <PersonaFace id={persona.id} size={32} />
+                    <PersonaFace id={persona.code} size={32} />
                     <div className="min-w-0">
-                      <p className="font-semibold text-ink">{label(persona.id)}</p>
+                      <p className="font-semibold text-ink">{label(persona.code)}</p>
                       <p className="truncate text-[12px] text-subtext">
                         {persona.age_band_real && persona.gender_real
                           ? `${persona.age_band_real} · ${persona.gender_real}`
