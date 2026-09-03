@@ -71,6 +71,34 @@ PROVIDERS = {
         },
         "price": {"input": 0.40, "output": 2.40},
     },
+    # Groq. 오픈소스 가중치 모델(Llama)을 무료 티어로 호스팅한다. OpenAI 호환.
+    # 2026-09 웹 조사 기준(그록 콘솔 직접 확인 전) 무료 티어 한도:
+    #   llama-3.1-8b-instant   : 30 RPM · 14,400 RPD · 6,000 TPM  · 500,000 TPD
+    #   llama-3.3-70b-versatile: 30 RPM ·  1,000 RPD · 12,000 TPM · 100,000 TPD
+    # explore는 스텝마다 불려서 호출·토큰 여유가 큰 8b를, goals/analyze는
+    # 실행당 몇 번뿐이라 한도가 빡빡해도 되는 70b를 쓴다.
+    # ⚠ 무료 티어라 price=0으로 두면 run.py의 --max-usd 예산 상한이 절대 안
+    #   걸린다(늘 $0 소진). 진짜 브레이크는 이 티어의 요청·토큰 한도이고,
+    #   넘으면 예산 초과가 아니라 429 에러로 실행이 실패한다.
+    # ⚠ 비전(답사/survey)용 모델은 이 조사 시점 기준 Groq 활성 모델 목록에
+    #   없었다 — 지금은 --no-map(답사 미연결)이라 안 쓰이지만, 답사를 나중에
+    #   연결하면 model_survey를 다른 프로바이더로 갈아끼워야 한다.
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "key_env": "GROQ_API_KEY",
+        "fallbacks": {
+            "explore": ["llama-3.3-70b-versatile"],
+        },
+        "model_survey":  "llama-3.3-70b-versatile",  # 비전 아님 — 답사 연결 전까지 미사용
+        "model_goals":   "llama-3.3-70b-versatile",
+        "model_explore": "llama-3.1-8b-instant",
+        "model_analyze": "llama-3.3-70b-versatile",
+        "prices": {
+            "llama-3.1-8b-instant":    {"input": 0.0, "output": 0.0},
+            "llama-3.3-70b-versatile": {"input": 0.0, "output": 0.0},
+        },
+        "price": {"input": 0.0, "output": 0.0},
+    },
 }
 
 

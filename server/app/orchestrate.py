@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 import subprocess
 import sys
 import uuid
@@ -27,6 +28,27 @@ from .db import session_scope
 from .models import Defect, Mission, Persona, Run, SiteVariant, Test, TraitCombo
 
 log = logging.getLogger(__name__)
+
+# uxagent/config.py의 PROVIDERS 각 항목의 key_env를 그대로 옮긴 것 — 그쪽을
+# import하지 않는 이유는 서버 프로세스가 agent-ux/를 sys.path에 안 두기
+# 때문이다(run.py를 subprocess로만 부른다). 프로바이더를 추가하면 여기도
+# 같이 늘릴 것.
+_PROVIDER_KEY_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
+
+
+def _has_llm_key() -> bool:
+    """지금 UXAGENT_PROVIDER로 실제 호출이 될 만큼 키가 있는가.
+
+    없으면 --mock을 붙인다 — 로컬 개발이나 키를 아직 안 넣은 배포에서
+    "테스트 하기"가 API 에러로 죽는 대신 조용히 mock으로 도는 편이 낫다.
+    """
+    provider = os.environ.get("UXAGENT_PROVIDER", "gemini")
+    key_env = _PROVIDER_KEY_ENV.get(provider)
+    return bool(key_env and os.environ.get(key_env))
 
 AGENT_UX_DIR = Path(__file__).resolve().parent.parent.parent / "agent-ux"
 LOGS_DIR = AGENT_UX_DIR / "logs"
@@ -76,10 +98,15 @@ def _run(run_id: uuid.UUID) -> None:
         "--goal", goal,
         "--run-id", str(run_id),
         "--all", "--yes",
-        "--mock",       # 이 컴퓨터엔 LLM API 키가 없다. 키가 생기면 이 플래그만 뗀다.
         "--no-map",     # 답사(지도) 파이프라인은 아직 연결 전이다.
         "--quiet",
     ]
+    if not _has_llm_key():
+        # UXAGENT_PROVIDER에 맞는 키가 /etc/moji-api.env에 없다 — API 에러로
+        # 실행이 죽는 대신 mock으로 조용히 떨어진다.
+        args.append("--mock")
+        log.warning("LLM 키 없음(UXAGENT_PROVIDER=%s) — --mock으로 실행 (run_id=%s)",
+                    os.environ.get("UXAGENT_PROVIDER", "gemini"), run_id)
     if expect:
         args += ["--expect", expect]
 
