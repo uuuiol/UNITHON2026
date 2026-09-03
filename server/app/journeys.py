@@ -597,13 +597,125 @@ def build_replay(session: Session, run: Run) -> dict[str, dict]:
     return out
 
 
-def build_steps_payload(walks: list[Walk], test_name: str, replay: dict[str, dict] | None = None) -> dict:
+# --------------------------------------------------------------------------- #
+# 다이어그램 막대 상세 — 사진 + 클릭 열지도
+# --------------------------------------------------------------------------- #
+#
+# build_diagram()/build_steps_payload()가 쓰는 (position, screen_key) 서명은
+# Walk.screens(연속된 같은 화면을 접은 것)에서 나온다. 그런데 Walk/Step DB에는
+# 좌표가 없다(찍는 코드가 없다 — 이 파일 맨 위 주석) — 그래서 클릭 좌표는 여기서도
+# build_replay()처럼 원본 트레이스(Journey.log_path)를 다시 읽어서 구한다. 다만
+# load_walks()가 이미 한 번 접어 둔 결과(screen.key, position 순서)와 자리가
+# 어긋나면 안 되므로, 여기서도 **같은 접기 규칙**을 원본 스텝에 다시 적용한다.
+
+
+def _diagram_raw_frames(trace: dict) -> list[dict]:
+    """load_walks()와 같은 규칙(막힌 행동은 화면을 안 바꾼다, 연속된 같은 화면은
+    한 자리로 접는다)을 원본 트레이스에 적용해, 접힌 자리(position)마다 거기
+    몰린 클릭 좌표까지 함께 들고 온다. 규칙이 어긋나면 이 클릭이 엉뚱한
+    화면(다른 position)에 붙는다 — load_walks()를 고칠 땐 이쪽도 같이 볼 것.
+    """
+    folded: list[dict] = []
+    for s in trace.get("steps") or []:
+        if s.get("blocked_action") is not None:
+            continue
+        snap = s.get("snapshot") or {}
+        outcome = s.get("outcome") or {}
+        url = snap.get("url") or outcome.get("url_after") or ""
+        if not url:
+            continue
+        if not folded or folded[-1]["key"] != url:
+            folded.append({"key": url, "clicks": []})
+        r = s.get("resolved")
+        if r:
+            folded[-1]["clicks"].append({
+                "x": round(r["x"] + r["w"] / 2), "y": round(r["y"] + r["h"] / 2),
+                "w": round(r["w"]), "h": round(r["h"]),
+                "label": (r.get("text") or "").strip()[:24],
+                "wasted": not bool(outcome.get("changed")),
+            })
+    return folded
+
+
+def build_diagram_shots(session: Session, run: Run, walks: list[Walk]) -> dict[str, dict]:
+    """다이어그램 막대 하나(node_id)를 눌렀을 때 뜨는 사진+클릭. build_steps_payload가 얹는다."""
+    test = session.get(Test, run.test_id)
+    if test is None or not test.target_url:
+        return {}
+    root = orchestrate.target_root(test.target_url)
+    stem = orchestrate._map_stem(test.target_url)
+
+    journeys_by_id = {
+        j.id: j
+        for j in session.scalars(
+            select(Journey).where(Journey.id.in_([w.journey_id for w in walks]))
+        )
+    }
+    raw_by_journey: dict[uuid.UUID, list[dict]] = {}
+    for walk in walks:
+        journey = journeys_by_id.get(walk.journey_id)
+        if journey is None or not journey.log_path:
+            continue
+        try:
+            trace = json.loads(Path(journey.log_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        raw_by_journey[walk.journey_id] = _diagram_raw_frames(trace)
+
+    shot_cache: dict[str, dict | None] = {}
+
+    def shot_of(url: str) -> dict | None:
+        key = _shot_key(url, root)
+        if key not in shot_cache:
+            filenames = _shots_for(stem, key)
+            shot_cache[key] = (
+                {"src": f"/api/shots/{stem}/{filenames[0]}", "w": _VIEWPORT_W, "h": _VIEWPORT_H}
+                if filenames else None
+            )
+        return shot_cache[key]
+
+    # 화면별 전체 클릭 — 한 단계엔 몇 번뿐이라 그것만으론 열지도가 안 된다.
+    # 이 화면에서 그동안 벌어진 일 전부를 옅게 깔고, 이 단계 클릭만 진하게 얹는다.
+    screen_clicks: dict[str, list[dict]] = defaultdict(list)
+    for frames in raw_by_journey.values():
+        for frame in frames:
+            for c in frame["clicks"]:
+                screen_clicks[frame["key"]].append({"x": c["x"], "y": c["y"], "wasted": c["wasted"]})
+
+    out: dict[str, dict] = {}
+    for walk in walks:
+        frames = raw_by_journey.get(walk.journey_id)
+        if frames is None:
+            continue
+        for position, screen in enumerate(walk.screens):
+            if position >= len(frames):
+                continue  # 접기 규칙이 어긋난 드문 경우 — 조용히 건너뛴다.
+            node_id = f"{position}:{screen.key}"
+            entry = out.setdefault(node_id, {
+                "shot": shot_of(screen.key),
+                "clicks": [],
+                "screen_clicks": screen_clicks.get(screen.key, []),
+            })
+            for c in frames[position]["clicks"]:
+                entry["clicks"].append({**c, "persona": walk.persona_code})
+
+    for entry in out.values():
+        entry["wasted"] = sum(1 for c in entry["clicks"] if c["wasted"])
+    return out
+
+
+def build_steps_payload(
+    walks: list[Walk],
+    test_name: str,
+    replay: dict[str, dict] | None = None,
+    diagram_shots: dict[str, dict] | None = None,
+) -> dict:
     """스텝별 막대 + 필름스트립. build_diagram 과 같은 (position, screen_key) 서명을 쓴다 —
     두 화면의 숫자가 어긋나면 안 되기 때문이다.
 
-    클릭 좌표·스크린샷은 DB에 없어서(찍는 코드가 없다) clicks/screen_clicks 는 빈 배열,
-    shot 은 null 로 정직하게 비워 둔다 — 이 둘은 화면 타입에서 선택적(optional)
-    필드라 없어도 깨지지 않는다. replay는 build_replay()가 따로 만들어 여기 얹는다.
+    clicks/screen_clicks/shot은 build_diagram_shots()가 원본 트레이스에서 따로 만들어
+    여기 얹는다(없으면 정직하게 비워 둔다 — 화면 타입에서 셋 다 선택적이라 없어도
+    안 깨진다). replay는 build_replay()가 만든다.
     """
     picked = [w for w in walks if w.screens]
     if not picked:
@@ -622,12 +734,14 @@ def build_steps_payload(walks: list[Walk], test_name: str, replay: dict[str, dic
             by_node[node_id].append((walk, screen))
             node_title.setdefault(node_id, screen.title)
 
+    shots = diagram_shots or {}
     steps: dict[str, dict] = {}
     for node_id, here in by_node.items():
         position = int(node_id.split(":", 1)[0])
         here_ids = {w.persona_id for w, _ in here}
         elsewhere = [w for w in picked if len(w.screens) > position and w.persona_id not in here_ids]
         finished = [w for w in picked if len(w.screens) <= position and w.persona_id not in here_ids]
+        shot_entry = shots.get(node_id) or {}
 
         steps[node_id] = {
             "id": node_id,
@@ -635,10 +749,10 @@ def build_steps_payload(walks: list[Walk], test_name: str, replay: dict[str, dic
             "screen": node_id.split(":", 1)[1],
             "title": node_title[node_id],
             "count": len(here),
-            "shot": None,
-            "clicks": [],
-            "screen_clicks": [],
-            "wasted": 0,
+            "shot": shot_entry.get("shot"),
+            "clicks": shot_entry.get("clicks", []),
+            "screen_clicks": shot_entry.get("screen_clicks", []),
+            "wasted": shot_entry.get("wasted", 0),
             "personas": [_step_persona(w, s) for w, s in here],
             "elsewhere": [_step_persona(w, None) for w in elsewhere],
             "finished": [_step_persona(w, None) for w in finished],
@@ -654,7 +768,7 @@ def build_steps_payload(walks: list[Walk], test_name: str, replay: dict[str, dic
         others = sum(n["count"] for n in nodes_here) - top["count"]
         filmstrip.append({
             "step": position + 1, "id": top["id"], "title": top["title"],
-            "count": top["count"], "shot": None, "others": others,
+            "count": top["count"], "shot": (shots.get(top["id"]) or {}).get("shot"), "others": others,
         })
 
     return {

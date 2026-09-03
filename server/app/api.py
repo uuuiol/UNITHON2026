@@ -20,6 +20,7 @@ from .estimates import DEFAULT_PAGE_COUNT, estimate
 from .journeys import (
     DROP_REASONS,
     build_diagram,
+    build_diagram_shots,
     build_replay,
     build_steps_payload,
     compared_persona_rows,
@@ -903,7 +904,8 @@ def test_steps(
     primary = _primary_run(test_id, session)
     walks = load_walks(session, None, run_id=primary.id) if primary else []
     replay = build_replay(session, primary) if primary else {}
-    return build_steps_payload(walks, test.name, replay)
+    diagram_shots = build_diagram_shots(session, primary, walks) if primary else {}
+    return build_steps_payload(walks, test.name, replay, diagram_shots)
 
 
 # --------------------------------------------------------------------------- #
@@ -989,8 +991,9 @@ def live_steps(
 ) -> dict:
     run = _owned_run(run_id, user, session)
     test = _load_test(run.test_id, session)
+    walks = load_walks(session, None, run_id=run.id)
     return build_steps_payload(
-        load_walks(session, None, run_id=run.id), test.name, build_replay(session, run)
+        walks, test.name, build_replay(session, run), build_diagram_shots(session, run, walks)
     )
 
 
