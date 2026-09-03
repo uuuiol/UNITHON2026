@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import threading
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
@@ -81,6 +83,71 @@ async def thumbnail(url: str, user: User = Depends(auth.get_current_user)) -> Re
         content=png,
         media_type="image/png",
         # 캐시는 서버에도 있지만, 목록을 오갈 때마다 다시 받아올 이유가 없다.
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+_SAFE_SHOTS_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_shots_dir(stem: str) -> Path:
+    """stem을 경로 하나로. 검사에 실패하면(위로 나가거나 이상한 문자) 400."""
+    if not _SAFE_SHOTS_SEGMENT.match(stem):
+        raise HTTPException(status_code=400, detail="잘못된 주소예요")
+    base = orchestrate.SHOTS_DIR.resolve()
+    target = (orchestrate.SHOTS_DIR / stem).resolve()
+    if base not in target.parents and target != base:
+        raise HTTPException(status_code=400, detail="잘못된 주소예요")
+    return target
+
+
+@router.get("/shots/{stem}")
+def shots_gallery(stem: str) -> Response:
+    """[화면] "답사자가 본 화면 보기" — 답사(survey.py) 중 찍힌 스크린샷 갤러리.
+
+    로그인을 요구하지 않는다 — 새 창으로 열거나(target="_blank") <img>로
+    받는 통로는 로그인 토큰(Bearer)을 실어 보낼 방법이 없다(/api/thumbnail이
+    똑같이 겪는 제약). 여기서 보여주는 것도 이미 공개된 페이지를 답사가
+    찍어 둔 사진이라, 로그인 없이 열어도 새로 새는 정보가 없다.
+    """
+    d = _safe_shots_dir(stem)
+    files = sorted(p.name for p in d.glob("*.png")) if d.is_dir() else []
+    if not files:
+        body = '<p style="color:#999">아직 답사 스크린샷이 없습니다.</p>'
+    else:
+        body = "".join(
+            f'<figure><img src="/api/shots/{stem}/{f}" loading="lazy">'
+            f'<figcaption>{f}</figcaption></figure>'
+            for f in files
+        )
+    html = (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>답사자가 본 화면 · {stem}</title>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:24px}"
+        "h1{font-size:16px;font-weight:600}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px;margin-top:16px}"
+        "figure{margin:0}"
+        "img{width:100%;border-radius:8px;display:block;background:#222}"
+        "figcaption{font-size:12px;color:#999;margin-top:6px;word-break:break-all}"
+        "</style></head><body>"
+        f"<h1>{stem}</h1>"
+        f'<div class="grid">{body}</div>'
+        "</body></html>"
+    )
+    return Response(content=html, media_type="text/html; charset=utf-8")
+
+
+@router.get("/shots/{stem}/{filename}")
+def shots_image(stem: str, filename: str) -> Response:
+    if not _SAFE_SHOTS_SEGMENT.match(filename) or not filename.endswith(".png"):
+        raise HTTPException(status_code=400, detail="잘못된 파일명이에요")
+    fp = _safe_shots_dir(stem) / filename
+    if not fp.is_file():
+        raise HTTPException(status_code=404, detail="스크린샷을 찾을 수 없어요")
+    return Response(
+        content=fp.read_bytes(),
+        media_type="image/png",
         headers={"Cache-Control": "public, max-age=3600"},
     )
 

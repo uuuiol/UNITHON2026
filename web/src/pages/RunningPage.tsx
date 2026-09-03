@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getActiveRun, getProject, type ActiveRun } from '../api/client'
+import { API_BASE, getActiveRun, getProject, type ActiveRun } from '../api/client'
 import { useQuery } from '../api/hooks'
 import arrowIcon from '../assets/icons/arrow.svg'
 import { AppLayout, PageBody } from '../components/AppLayout'
 import { WizardTopBar } from '../components/StepIndicator'
 import { estimateRun } from '../lib/estimate'
+import { mapStem } from '../lib/mapStem'
 import { useWizard } from '../state/WizardContext'
 
 /** 진행 상황을 얼마나 자주 다시 물을지. 파이프라인이 여정을 채우는 속도 기준. */
@@ -147,11 +148,20 @@ export function RunningPage() {
             <img src={arrowIcon} alt="" aria-hidden className="size-[15px] invert" />
           </button>
 
-          {/* [빠짐] 답사자가 본 화면 링크는 원래 로컬 개발 중 agent-ux/server.py를
-              띄워 두고 보는 임시 통로였다 — 그 스크린샷 서버는 AWS 배포본에는
-              애초에 붙어 있지 않다(진짜 실행은 orchestrate.py가 다른 경로로
-              돌린다). 안 쓰는 링크를 남겨 두면 눌렀을 때 404만 본다 — 실제로
-              보여줄 화면이 생기면 그때 다시 연결한다. */}
+          {/* 답사(survey.py)가 실제로 찍어 둔 스크린샷 갤러리 — /api/shots가
+              서버에 붙은 뒤로 다시 연결했다. 재생 중에는 안 띄운다: 재생은
+              이미 끝난 기록을 다시 보여주는 것뿐이라, 지금 막 답사가 도는
+              것처럼 보이면 없는 일을 지어내는 셈이다. */}
+          {replaying || !project.data?.preview_url ? null : (
+            <a
+              href={`${API_BASE}/api/shots/${mapStem(project.data.preview_url)}`}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-[14px] text-[15px] text-subtext underline underline-offset-4 hover:text-ink"
+            >
+              답사자가 본 화면 보기 (스크린샷)
+            </a>
+          )}
         </div>
       </PageBody>
     </AppLayout>
