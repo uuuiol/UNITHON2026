@@ -306,7 +306,12 @@ def resolve_target(variant: str | None, url: str | None,
         root = clean.rsplit("/", 1)[0] if clean.count("/") > 2 else origin
         return {
             "kind": "url",
-            "name": origin.split("//")[-1],
+            # 호스트만 쓰면 같은 호스트의 서로 다른 페이지(예: 우리 테스트베드의
+            # clean/flawed, 같은 사이트의 다른 코너)가 지도·스크린샷 캐시 파일명을
+            # 공유해 서로 덮어써 버린다(2026-09-03 실측: ux-testbed의 clean과
+            # flawed가 정확히 이 문제로 스크린샷을 나눠 가졌다). scope와 똑같이
+            # root(경로 포함)로 키를 잡아야 서로 다른 페이지가 서로 다른 캐시를 쓴다.
+            "name": root.split("//", 1)[-1],
             "start": clean,
             "root": root,
             "origin": origin,
@@ -357,12 +362,24 @@ def search_allowed_for(person: dict, site_kind: str) -> bool:
     return bool(person.get("search_allowed", True))
 
 
+#: map_stem()이 만드는 파일명 길이 상한. server/app/orchestrate.py의 _map_stem()·
+#: web/src/lib/mapStem.ts의 mapStem()과 반드시 같은 값이어야 한다 — 셋 중 하나만
+#: 다르게 자르면 셋이 서로 다른 캐시 파일을 가리키게 된다.
+MAP_STEM_MAX_LEN = 150
+
+
 def map_stem(target: dict) -> str:
-    """지도·기록 파일에 쓸 짧은 이름. 주소를 파일명으로 쓸 수 없으니 호스트만 남긴다."""
+    """지도·기록 파일에 쓸 짧은 이름. 주소를 파일명으로 쓸 수 없어 안전한 문자만 남긴다.
+
+    호스트만 쓰던 시절엔 같은 사이트의 서로 다른 페이지(우리 테스트베드의
+    clean/flawed 등)가 캐시를 공유해 서로 덮어썼다 — 그래서 target["name"]에
+    경로(root)까지 담겨 온다(resolve_target() 참고). 여기서는 그걸 파일명으로
+    쓸 수 있는 문자로만 바꿀 뿐이다.
+    """
     if target.get("map_name"):
         return target["map_name"]
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target["name"])
-    return safe.strip("_") or "site"
+    return (safe.strip("_") or "site")[:MAP_STEM_MAX_LEN]
 
 
 def in_scope(url: str, target: dict) -> bool:

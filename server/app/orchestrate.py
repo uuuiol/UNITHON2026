@@ -67,6 +67,12 @@ PERSONAS_JSON_PATH = AGENT_UX_DIR / "personas" / "personas.json"
 SURVEY_MAX_PAGES = "6"
 
 
+#: uxagent/config.py의 MAP_STEM_MAX_LEN과 반드시 같은 값이어야 한다 — 둘 중
+#: 하나만 다르게 자르면 서버가 확인하는 캐시 파일명과 run.py가 실제로 쓰는
+#: 캐시 파일명이 어긋난다.
+_MAP_STEM_MAX_LEN = 150
+
+
 def _map_stem(url: str) -> str:
     """uxagent.config.map_stem()의 --url 갈래를 그대로 옮긴 것.
 
@@ -75,11 +81,18 @@ def _map_stem(url: str) -> str:
     확인하려면 파일명 규칙을 여기서도 알아야 한다. uxagent/config.py의
     resolve_target(url=...)·map_stem()과 어긋나면 안 되니 로직을 바꿀 땐
     거기도 같이 고칠 것.
+
+    호스트만 쓰던 예전 버전은 같은 호스트의 서로 다른 페이지(우리
+    테스트베드의 clean/flawed 등)가 지도·스크린샷 캐시를 공유해 서로
+    덮어썼다(2026-09-03 실측) — 그래서 경로까지 포함한 root를 키로 쓴다.
     """
     clean = url if "://" in url else "https://" + url
-    host = urlsplit(clean).netloc
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in host)
-    return safe.strip("_") or "site"
+    parts = urlsplit(clean)
+    origin = f"{parts.scheme}://{parts.netloc}" if parts.netloc else clean
+    root = clean.rsplit("/", 1)[0] if clean.count("/") > 2 else origin
+    raw_name = root.split("//", 1)[-1]
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in raw_name)
+    return (safe.strip("_") or "site")[:_MAP_STEM_MAX_LEN]
 
 
 def _ensure_site_map(target_url: str, run_id: uuid.UUID) -> bool:
