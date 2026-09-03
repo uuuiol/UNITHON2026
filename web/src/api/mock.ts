@@ -642,7 +642,12 @@ export function mockResponse(rawPath: string, init?: RequestInit): unknown {
     return checkUrl(url)
   }
 
-  if (path === '/api/missions/analyze') return analyzeMissionText(String(body?.prompt ?? ''))
+  if (path === '/api/missions/analyze') {
+    // /runs와 같은 기준: 진짜로 돌리기로 했으면(LIVE_RUN) 여기서 답하지 않는다.
+    // 서버가 진짜 Anthropic Claude를 불러 성공 기준을 뽑는다.
+    if (LIVE_RUN) return MOCK_MISS
+    return analyzeMissionText(String(body?.prompt ?? ''))
+  }
 
   // ── 프로젝트 ──────────────────────────────────────────────────
   if (path === '/api/projects' && method === 'GET') return allSites().map(projectCard)
