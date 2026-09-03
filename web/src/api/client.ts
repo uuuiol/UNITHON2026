@@ -568,8 +568,43 @@ export type StepsPayload = {
   replay?: Record<string, PersonaReplay>
 }
 
+/**
+ * 서버(journeys.py)가 만든 shot.src는 "/api/shots/..." 같은 백엔드 상대경로다.
+ * 배포본은 프런트(Amplify)와 백엔드(CloudFront)가 오리진이 달라서, 이 값을
+ * 그대로 <img src>에 넣으면 프런트 자기 자신에 물어 404가 난다(SitePreview.tsx의
+ * 썸네일이 겪던 것과 같은 문제 — 거기는 컴포넌트가 직접 API_BASE를 붙인다).
+ * 여기서는 반대로 데이터를 받는 시점에 붙인다 — 재생창(ReplayStage 등) 여러 곳이
+ * shot.src를 그대로 쓰므로, 한 곳(여기)만 고치면 전부 같이 고쳐진다. 데모 데이터의
+ * shot.src(예: "/screens/...")는 프런트 자신의 정적 자산이라 "/api/"로 시작하지
+ * 않으므로 건드리지 않는다.
+ */
+function withShotBase<T extends { src: string; w: number; h: number } | null>(shot: T): T {
+  if (shot && shot.src.startsWith('/api/')) {
+    return { ...shot, src: `${API_BASE}${shot.src}` }
+  }
+  return shot
+}
+
+function fixStepsPayload(payload: StepsPayload): StepsPayload {
+  return {
+    ...payload,
+    steps: Object.fromEntries(
+      Object.entries(payload.steps).map(([id, s]) => [id, { ...s, shot: withShotBase(s.shot) }]),
+    ),
+    filmstrip: payload.filmstrip.map((f) => ({ ...f, shot: withShotBase(f.shot) })),
+    replay: payload.replay
+      ? Object.fromEntries(
+          Object.entries(payload.replay).map(([id, p]) => [
+            id,
+            { ...p, frames: p.frames.map((fr) => ({ ...fr, shot: withShotBase(fr.shot) })) },
+          ]),
+        )
+      : payload.replay,
+  }
+}
+
 export const getTestSteps = (testId: string, variant?: Variant, runId?: string) =>
-  request<StepsPayload>(withVariant(src(runId, testId, '/steps'), variant))
+  request<StepsPayload>(withVariant(src(runId, testId, '/steps'), variant)).then(fixStepsPayload)
 
 
 // --------------------------------------------------------------------------- //
