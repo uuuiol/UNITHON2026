@@ -20,6 +20,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from sqlalchemy import exists, select
 
@@ -52,7 +53,71 @@ def _has_llm_key() -> bool:
 
 AGENT_UX_DIR = Path(__file__).resolve().parent.parent.parent / "agent-ux"
 LOGS_DIR = AGENT_UX_DIR / "logs"
+MAPS_DIR = AGENT_UX_DIR / "maps"
+SHOTS_DIR = AGENT_UX_DIR / "shots"
 PERSONAS_JSON_PATH = AGENT_UX_DIR / "personas" / "personas.json"
+
+#: 답사 페이지 수 상한. agent-ux/server.py(예전 로컬 브리지)가 쓰던 값을
+#: 그대로 가져왔다 — 실행마다가 아니라 사이트마다 한 번만 도니 넉넉해도 된다.
+SURVEY_MAX_PAGES = "6"
+
+
+def _map_stem(url: str) -> str:
+    """uxagent.config.map_stem()의 --url 갈래를 그대로 옮긴 것.
+
+    이 파일 위 설명대로 서버 프로세스는 agent-ux를 import하지 않는다
+    (run.py를 subprocess로만 부른다) — 그래서 지도 캐시 여부를 먼저
+    확인하려면 파일명 규칙을 여기서도 알아야 한다. uxagent/config.py의
+    resolve_target(url=...)·map_stem()과 어긋나면 안 되니 로직을 바꿀 땐
+    거기도 같이 고칠 것.
+    """
+    clean = url if "://" in url else "https://" + url
+    host = urlsplit(clean).netloc
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in host)
+    return safe.strip("_") or "site"
+
+
+def _ensure_site_map(target_url: str, run_id: uuid.UUID) -> bool:
+    """이 사이트의 지도가 이미 있으면 그대로 쓰고, 없으면 답사부터 한 번 돌린다.
+
+    지도가 있어야 페르소나가 "이 사이트에 어떤 화면·버튼이 있는지" 미리 알고
+    움직인다 — 없으면 매 스텝 화면을 새로 읽으며 헤매다 첫 화면에서 포기하는
+    비율이 크게 는다(실측: flawed 사이트 3명 전원 첫 화면 이탈).
+
+    답사 자체가 실패해도(사이트 접근 실패, LLM 판단 표현 재생성 3회 초과 등)
+    전체 테스트를 막지 않는다 — 지도 없이 도는 이전 동작으로 조용히 떨어진다.
+    반환값은 "지도를 쓸 수 있는가"다.
+    """
+    stem = _map_stem(target_url)
+    map_path = MAPS_DIR / f"site_map_{stem}.json"
+    if map_path.exists():
+        return True
+
+    args = [
+        sys.executable, "survey.py",
+        "--url", target_url,
+        "--yes",
+        "--max-pages", SURVEY_MAX_PAGES,
+        "--shots-dir", str(SHOTS_DIR / stem),
+    ]
+    if not _has_llm_key():
+        # 답사는 페이지마다 LLM을 부른다 — 키가 없으면 어차피 run.py도
+        # --mock으로 떨어지니 답사도 같이 mock으로 맞춘다. (mock 답사는
+        # 스크린샷을 남기지 않는다 — uxagent/survey.py survey_page 참고.)
+        args.append("--mock")
+
+    log.info("사이트 지도가 없어 답사부터 시작합니다: %s (run_id=%s)", target_url, run_id)
+    result = subprocess.run(
+        args, cwd=AGENT_UX_DIR, capture_output=True, text=True, encoding="utf-8"
+    )
+    if result.returncode != 0 or not map_path.exists():
+        log.warning(
+            "답사 실패, 지도 없이 진행합니다 (run_id=%s, exit=%s)\nstdout:\n%s\nstderr:\n%s",
+            run_id, result.returncode, result.stdout[-2000:], result.stderr[-2000:],
+        )
+        return False
+    log.info("답사 완료, 지도 저장됨: %s (run_id=%s)", map_path, run_id)
+    return True
 
 
 def start_pipeline_run(run_id: uuid.UUID) -> None:
@@ -92,15 +157,18 @@ def _run(run_id: uuid.UUID) -> None:
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
     )
 
+    has_map = _ensure_site_map(target_url, run_id)
+
     args = [
         sys.executable, "run.py",
         "--url", target_url,
         "--goal", goal,
         "--run-id", str(run_id),
         "--all", "--yes",
-        "--no-map",     # 답사(지도) 파이프라인은 아직 연결 전이다.
         "--quiet",
     ]
+    if not has_map:
+        args.append("--no-map")
     if not _has_llm_key():
         # UXAGENT_PROVIDER에 맞는 키가 /etc/moji-api.env에 없다 — API 에러로
         # 실행이 죽는 대신 mock으로 조용히 떨어진다.
