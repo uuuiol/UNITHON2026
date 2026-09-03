@@ -22,6 +22,13 @@ export function RunningPage() {
   const project = useQuery(() => getProject(projectId), [projectId])
   const [run, setRun] = useState<ActiveRun | null>(null)
   const replaying = run?.replay ?? false
+  // 서버는 "도는 중"인 실행만 돌려준다 — A/B 두 arm이 모두 done 이 되는
+  // 순간 /api/runs/active 는 null 로 뒤집힌다. 그걸 그대로 반영하면
+  // done/total 이 0/0 이 되어 진행바가 100% 문턱에서 0%로 되감긴 것처럼
+  // 보이고, 완료 판정(percent>=100)도 영영 안 걸려 화면이 멈춰 선다.
+  // 그래서 마지막으로 본 실행을 기억해 뒀다가, null 로 바뀌면 그걸 100%로
+  // 마무리해 넘겨준다.
+  const lastRunRef = useRef<ActiveRun | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -29,7 +36,16 @@ export function RunningPage() {
     const tick = async () => {
       try {
         const next = await getActiveRun()
-        if (alive) setRun(next)
+        if (!alive) return
+        if (next) {
+          lastRunRef.current = next
+          setRun(next)
+          return
+        }
+        const last = lastRunRef.current
+        if (last?.test_id) {
+          setRun({ ...last, percent: 100, done: last.total || last.done })
+        }
       } catch {
         // 폴링 실패는 화면을 깨뜨리지 않는다. 다음 주기에 다시 시도한다.
       }

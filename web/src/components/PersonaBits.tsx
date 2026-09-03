@@ -28,6 +28,21 @@ export function Dots({ value }: { value: number }) {
   )
 }
 
+/**
+ * DB 특성 축 하나의 값 — "정독"/"훑기"처럼 **둘 중 하나**다.
+ *
+ * Dots는 1~5 단계용이라 이 값에 억지로 씌우면 없는 중간 단계를 지어내는
+ * 셈이 된다. 실제 값을 그대로 텍스트로 보여준다.
+ */
+export function TraitLabel({ value }: { value?: string }) {
+  if (!value) return <span className="text-[13px] text-subtext">–</span>
+  return (
+    <span className="rounded-[6px] bg-bg px-[8px] py-[3px] text-[13px] font-medium text-ink">
+      {value}
+    </span>
+  )
+}
+
 /** 한쪽 사이트에서의 결과 — 배지 + 스텝 막대. 막대 길이는 스텝 수에 비례한다. */
 export function SideResult({ side }: { side: PersonaSideResult | null }) {
   if (!side) return <span className="text-[13px] text-subtext">–</span>

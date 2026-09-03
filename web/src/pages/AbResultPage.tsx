@@ -12,7 +12,7 @@ import backArrow from '../assets/icons/back-arrow.svg'
 import { Icon } from '../components/Icon'
 import { NavigationDiagram } from '../components/NavigationDiagram'
 import { StepDetailModal } from '../components/StepDetailModal'
-import { Chip, Dots } from '../components/PersonaBits'
+import { Chip, TraitLabel } from '../components/PersonaBits'
 import { PersonaCompareTable } from '../components/PersonaCompareTable'
 import { ErrorBlock, LoadingBlock } from '../components/StateView'
 
@@ -229,7 +229,7 @@ function PersonaPanel({
               <div key={key} className="flex items-center justify-between gap-[10px]">
                 <dt className="text-[12px] text-muted">{axes[key]}</dt>
                 <dd>
-                  <Dots value={persona.traits?.[key] ?? 0} />
+                  <TraitLabel value={persona.traits?.[key]} />
                 </dd>
               </div>
             ))}

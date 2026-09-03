@@ -402,6 +402,9 @@ def compared_persona_rows(session: Session, run_baseline: Run | None, run_compar
             "name": display_name(persona.code),
             "age_band": persona.age_band,
             "gender": persona.gender,
+            # 실제로 존재하는 2단계 값이다 — 화면의 5단계 점과는 스케일이 다르니
+            # (AXIS_LABEL 주석 참고) 텍스트로 그대로 보여준다. 지어내지 않는다.
+            "traits": {axis: getattr(persona.trait_combo, axis) for axis in AXIS_LABEL},
             "outcome": compare["outcome"] if compare else None,
             "step_count": compare["step_count"] if compare else None,
             "baseline": baseline,

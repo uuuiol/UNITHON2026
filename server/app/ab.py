@@ -102,6 +102,7 @@ def compare_projects(session: Session, test_a: Test | None, test_b: Test | None)
             "name": display_name(persona.code),
             "age_band": persona.age_band,
             "gender": persona.gender,
+            "traits": {axis: getattr(persona.trait_combo, axis) for axis in AXIS_LABEL},
             "outcome": compare["outcome"] if compare else None,
             "step_count": compare["step_count"] if compare else None,
             "baseline": baseline,

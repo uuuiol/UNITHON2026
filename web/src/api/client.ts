@@ -473,8 +473,8 @@ export type PersonaRow = {
   gender: string
   outcome: PersonaOutcome
   step_count: number | null
-  /** 테스트 중 만들어진 행동 특성. 축마다 1~5단계. 사용자가 정하는 값이 아니다. */
-  traits?: Record<string, number>
+  /** 테스트 중 만들어진 행동 특성. 축마다 2단계 문자열(예: "정독"/"훑기"). 사용자가 정하는 값이 아니다. */
+  traits?: Record<string, string>
   /** 기준 사이트(정상판) 결과. 대조군이 없으면 null. */
   baseline?: PersonaSideResult | null
   /** 비교 사이트(결함판) 결과. */
