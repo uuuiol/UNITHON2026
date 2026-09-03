@@ -375,16 +375,10 @@ async function checkUrl(url: string) {
 // **실행 결과**에 대한 것이고, 여기 값은 결과가 아니라 **디자인이 정한 상품 정보**다.
 // 그래서 Figma(311:21271 · 336:28072 · 311:21384 · 311:21197)에 적힌 값을 그대로 옮긴다.
 //
-// 진짜 결제가 붙으면 이 블록을 지우고 아래 네 경로를 MOCK_MISS 로 바꾸면 된다.
+// /account는 결제와 무관하게 이미 진짜라 먼저 뗐다(위 mockResponse의
+// '/api/account' 분기 참고). 진짜 결제가 붙으면 아래 세 경로도 MOCK_MISS로
+// 바꾸면 된다.
 // --------------------------------------------------------------------------- //
-
-const ACCOUNT = {
-  name: '영찬',
-  initial: '영',
-  workspace: 'UX Test Lab',
-  email: 'youngchan@example.com',
-  plan_label: 'Pro',
-}
 
 const PLAN = {
   current: {
@@ -942,7 +936,11 @@ function stepsPayload(variant: string) {
     }
   }
 
-  if (path === '/api/account') return ACCOUNT
+  // /account는 서버에 실제 구현돼 있다(로그인한 사용자의 진짜 이름·이메일을
+  // 돌려준다) — 여기서 ACCOUNT로 흉내내면 누가 가입해도 화면엔 항상 "영찬"만
+  // 보인다. billing/*은 아직 결제가 없다는 정직한 스텁뿐이라(빈 tiers 등)
+  // 그대로 흉내낸다 — 화면이 갑자기 휑해지는 것보다는 낫다.
+  if (path === '/api/account') return MOCK_MISS
   if (path === '/api/billing/plan') return PLAN
   if (path === '/api/billing/credits') return CREDITS
   if (path === '/api/billing/tiers') return { tiers: PLAN_TIERS, packs: CREDIT_PACKS }
