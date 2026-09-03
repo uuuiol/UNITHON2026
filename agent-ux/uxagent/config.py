@@ -76,6 +76,9 @@ PROVIDERS = {
     # 고름 — 웹에서 조사했던 llama-3.1-8b-instant/llama-3.3-70b-versatile은
     # 이 계정에서 404였다(계정마다 열린 모델이 다를 수 있음. 바뀌면
     # `python check-llm.py --list`로 다시 확인할 것).
+    # ⚠ `openai/` 접두어가 실제로 필요하다 — /v1/models 목록·check-llm.py의
+    #   요약 표시는 접두어 없이 "gpt-oss-20b"로 보여주지만, 접두어 없이
+    #   호출하면 그대로 404다(curl로 직접 재현·확인함, 2026-09-03).
     #   gpt-oss-20b  : OpenAI가 공개한 오픈웨이트 모델. 100만 토큰당 $0.075/$0.30
     #   gpt-oss-120b : 같은 계열 대형판. 100만 토큰당 $0.15/$0.60
     # explore는 스텝마다 불려서 저가 20b, goals/analyze는 실행당 소수 호출이라
@@ -91,15 +94,15 @@ PROVIDERS = {
         "base_url": "https://api.groq.com/openai/v1",
         "key_env": "GROQ_API_KEY",
         "fallbacks": {
-            "explore": ["gpt-oss-120b"],
+            "explore": ["openai/gpt-oss-120b"],
         },
-        "model_survey":  "gpt-oss-120b",  # 비전 아님 — 답사 연결 전까지 미사용
-        "model_goals":   "gpt-oss-120b",
-        "model_explore": "gpt-oss-20b",
-        "model_analyze": "gpt-oss-120b",
+        "model_survey":  "openai/gpt-oss-120b",  # 비전 아님 — 답사 연결 전까지 미사용
+        "model_goals":   "openai/gpt-oss-120b",
+        "model_explore": "openai/gpt-oss-20b",
+        "model_analyze": "openai/gpt-oss-120b",
         "prices": {
-            "gpt-oss-20b":  {"input": 0.075, "output": 0.30},
-            "gpt-oss-120b": {"input": 0.15,  "output": 0.60},
+            "openai/gpt-oss-20b":  {"input": 0.075, "output": 0.30},
+            "openai/gpt-oss-120b": {"input": 0.15,  "output": 0.60},
         },
         "price": {"input": 0.075, "output": 0.30},
     },
