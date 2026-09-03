@@ -952,21 +952,20 @@ function stepsPayload(variant: string) {
 
   // 실행 시작.
   //
-  // 예전에는 이 요청을 진짜 서버로 넘겼다. 그런데 데모의 테스트 id 는 UUID 가
-  // 아니라서(`moji-before-test`) FastAPI 가 경로 변수를 파싱하다 **422** 를 냈다.
-  // 화면에는 "요청이 실패했어요 (HTTP 422)" 만 떴고, 사용자는 무엇이 잘못됐는지
-  // 알 수 없었다.
-  //
-  // 데모에는 돌릴 파이프라인이 없다. 대신 이 사이트들은 **이미 돌려 둔 실행 기록**이
-  // 있다. 그래서 새로 시작한 척하지 않고, 이미 끝난 실행이라고 사실대로 답한다 —
-  // 화면은 그 결과로 데려간다.
+  // 데모 3종(MOJI STORE 개선전/후, 위키백과)의 테스트 id 는 UUID 가 아니라
+  // 고정 문자열이다(`moji-before-test`). 예전엔 이 요청을 무조건 진짜 서버로
+  // 넘겨서 FastAPI 가 경로 변수를 파싱하다 **422** 를 냈다 — 화면에는
+  // "요청이 실패했어요 (HTTP 422)" 만 떴다. LIVE_RUN 을 켠 지금도 이 세 개는
+  // 여전히 재생 대상이다(돌릴 파이프라인이 없고, 이미 돌려 둔 실행 기록이
+  // 있으니 그걸 사실대로 보여준다) — **사용자가 직접 만든** 프로젝트만
+  // LIVE_RUN 일 때 진짜 서버로 넘긴다. `siteByTest` 로 먼저 갈라야
+  // LIVE_RUN 하나만 보고 셋 다 실서버로 흘려보내는 실수를 안 한다.
   if (path.endsWith('/runs') && method === 'POST') {
-    // 진짜로 돌리기로 했으면 여기서 답하지 않는다. 서버가 파이프라인을 띄운다.
-    if (LIVE_RUN) return MOCK_MISS
     const testId = path.split('/')[3] ?? ''
     const site = siteByTest(testId)
     if (!site) {
-      // 사용자가 직접 만든 프로젝트다. 재생할 기록도, 돌릴 파이프라인도 없다.
+      // 데모가 아니다 — 사용자가 직접 만든 진짜 프로젝트.
+      if (LIVE_RUN) return MOCK_MISS
       throw new Error(
         '배포된 데모에는 실행할 서버가 붙어 있지 않아요. ' +
           '새로 만든 프로젝트는 로컬에서 돌려야 합니다.',
@@ -994,6 +993,10 @@ function stepsPayload(variant: string) {
   }
 
   if (path === '/api/runs/active') {
+    // 방금 데모(3종) "테스트 하기"를 눌러 로컬 재생이 도는 중이면 그걸 먼저
+    // 보여준다 — 안 그러면 LIVE_RUN일 때 이 폴링이 실서버로 새어 나가
+    // "그런 실행 없음(null)"만 돌아오고 재생 중이던 진행률이 사라진다.
+    if (replay) return activeReplay()
     if (LIVE_RUN) return MOCK_MISS
     return activeReplay()
   }
