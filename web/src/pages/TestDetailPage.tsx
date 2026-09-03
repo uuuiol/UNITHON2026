@@ -20,7 +20,7 @@ import { PersonaReplayModal } from '../components/PersonaReplayModal'
 import { StepDetailModal } from '../components/StepDetailModal'
 import { SegmentedControl } from '../components/SegmentedControl'
 import { SitePreview } from '../components/SitePreview'
-import { Chip, SideResult, TraitLabel } from '../components/PersonaBits'
+import { Chip, SideResult, TraitDots } from '../components/PersonaBits'
 import { ErrorBlock, LoadingBlock } from '../components/StateView'
 import { TestSidebar } from '../components/TestSidebar'
 
@@ -462,7 +462,7 @@ function PersonaView({ testId }: { testId: string }) {
                 </td>
                 {axisKeys.map((k) => (
                   <td key={k} className="px-[10px] py-[12px]">
-                    <TraitLabel value={persona.traits?.[k]} />
+                    <TraitDots value={persona.traits?.[k]} />
                   </td>
                 ))}
                 <td className="px-[14px] py-[12px]">

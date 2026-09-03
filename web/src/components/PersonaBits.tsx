@@ -29,18 +29,24 @@ export function Dots({ value }: { value: number }) {
 }
 
 /**
- * DB 특성 축 하나의 값 — "정독"/"훑기"처럼 **둘 중 하나**다.
- *
- * Dots는 1~5 단계용이라 이 값에 억지로 씌우면 없는 중간 단계를 지어내는
- * 셈이 된다. 실제 값을 그대로 텍스트로 보여준다.
+ * DB 특성 축 하나의 실제 값("정독"/"훑기" 등, 둘 중 하나)을 점 눈금의
+ * 양 끝(1단계/5단계)에 놓는다. 셋째·넷째 단계처럼 없는 중간값을 지어내는
+ * 게 아니라, 있는 두 값을 그대로 눈금 위에 표시하는 것이다.
  */
-export function TraitLabel({ value }: { value?: string }) {
+const TRAIT_LEVEL: Record<string, number> = {
+  정독: 5,
+  훑기: 1,
+  급함: 5,
+  여유: 1,
+  능숙: 5,
+  서툼: 1,
+  높음: 5,
+  낮음: 1,
+}
+
+export function TraitDots({ value }: { value?: string }) {
   if (!value) return <span className="text-[13px] text-subtext">–</span>
-  return (
-    <span className="rounded-[6px] bg-bg px-[8px] py-[3px] text-[13px] font-medium text-ink">
-      {value}
-    </span>
-  )
+  return <Dots value={TRAIT_LEVEL[value] ?? 0} />
 }
 
 /** 한쪽 사이트에서의 결과 — 배지 + 스텝 막대. 막대 길이는 스텝 수에 비례한다. */

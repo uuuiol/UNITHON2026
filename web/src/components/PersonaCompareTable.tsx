@@ -1,5 +1,5 @@
 import type { PersonaRow } from '../api/client'
-import { Chip, SideResult, TraitLabel } from './PersonaBits'
+import { Chip, SideResult, TraitDots } from './PersonaBits'
 
 /**
  * 페르소나별 결과 비교 (Figma 329:24937 · 290:9817).
@@ -106,7 +106,7 @@ export function PersonaCompareTable({
                 </td>
                 {axisKeys.map((k) => (
                   <td key={k} className="px-[10px] py-[12px]">
-                    <TraitLabel value={persona.traits?.[k]} />
+                    <TraitDots value={persona.traits?.[k]} />
                   </td>
                 ))}
                 <td className="px-[14px] py-[12px]">
