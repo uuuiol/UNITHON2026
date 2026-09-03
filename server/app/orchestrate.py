@@ -239,22 +239,32 @@ def _run(run_id: uuid.UUID) -> None:
 
     log_dir = LOGS_DIR / str(run_id)
     seen: set[str] = set()
-    proc = subprocess.Popen(
-        args, cwd=AGENT_UX_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, encoding="utf-8",
-    )
-    while proc.poll() is None:
-        time.sleep(PROGRESS_POLL_SEC)
+    # logs/ 자체는 첫 페르소나가 끝나야 trace.py가 만든다(Trace.finish()) —
+    # stdout/stderr 로그 파일은 그보다 먼저 열어야 하니 여기서 미리 만든다.
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    # PIPE로 받으면 안 된다 — 진행 중엔 아무도 안 읽으니, run.py가 OS 파이프
+    # 버퍼(보통 64KB)를 채우는 순간 자기 stdout/stderr 쓰기에서 멈춰버리고,
+    # 이쪽은 time.sleep() 루프에서 그 죽은 프로세스가 끝나길 기다리며 같이
+    # 멈춘다 — 서로를 막는 교착이다. 파일로 받으면 이 문제가 없다.
+    with (LOGS_DIR / f"{run_id}.stdout.log").open("w+", encoding="utf-8") as out_f, \
+         (LOGS_DIR / f"{run_id}.stderr.log").open("w+", encoding="utf-8") as err_f:
+        proc = subprocess.Popen(args, cwd=AGENT_UX_DIR, stdout=out_f, stderr=err_f)
+        while proc.poll() is None:
+            time.sleep(PROGRESS_POLL_SEC)
+            _mark_progress(run_id, log_dir, seen)
+        returncode = proc.returncode
+        # 막 끝난 마지막 몇 명은 poll() 루프가 끝난 뒤에야 파일이 도착했을 수 있다.
         _mark_progress(run_id, log_dir, seen)
-    stdout, stderr = proc.communicate()
-    # 막 끝난 마지막 몇 명은 poll() 루프가 끝난 뒤에야 파일이 도착했을 수 있다.
-    _mark_progress(run_id, log_dir, seen)
-    returncode = proc.returncode
-    if returncode != 0:
-        log.warning(
-            "run.py 종료 코드 %s (run_id=%s)\nstdout:\n%s\nstderr:\n%s",
-            returncode, run_id, stdout[-2000:], stderr[-2000:],
-        )
+        if returncode != 0:
+            out_f.seek(0)
+            err_f.seek(0)
+            log.warning(
+                "run.py 종료 코드 %s (run_id=%s)\nstdout:\n%s\nstderr:\n%s",
+                returncode, run_id, out_f.read()[-2000:], err_f.read()[-2000:],
+            )
+    # 위 log.warning에 이미 꼬리를 남겼다 — 파일은 디스크에 계속 쌓일 이유가 없다.
+    for suffix in (".stdout.log", ".stderr.log"):
+        (LOGS_DIR / f"{run_id}{suffix}").unlink(missing_ok=True)
 
     with session_scope() as session:
         run = session.get(Run, run_id)
