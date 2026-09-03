@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -26,7 +27,11 @@ from sqlalchemy import exists, select
 
 from . import ingest, pipeline_export, static_scan
 from .db import session_scope
-from .models import Defect, Mission, Persona, Run, SiteVariant, Test, TraitCombo
+from .models import Defect, Journey, Mission, Persona, Run, SiteVariant, Test, TraitCombo
+
+#: run.py가 살아있는 동안 결과 폴더를 다시 살펴보는 주기(초). RunningPage의
+#: 폴링 주기(3초)보다 짧게 잡아야 화면이 갱신될 때 새 값이 이미 와 있다.
+PROGRESS_POLL_SEC = 2.0
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +125,47 @@ def _ensure_site_map(target_url: str, run_id: uuid.UUID) -> bool:
     return True
 
 
+def _mark_progress(run_id: uuid.UUID, log_dir: Path, seen: set[str]) -> None:
+    """log_dir에 새로 나타난 <페르소나 코드>.json을 Journey.finished_at에 즉시 반영한다.
+
+    trace.py의 Trace.finish()는 "한 명 끝날 때마다 즉시 저장한다"고 스스로 밝히듯
+    페르소나 한 명이 끝나는 즉시 <code>.json을 쓴다 — index.json(전체 요약)만
+    run.py가 전원 끝난 뒤 한 번에 쓴다. 그런데 지금까지는 ingest.ingest_run()이
+    index.json이 있어야만 동작해서, run.py 서브프로세스가 끝날 때까지 DB의
+    Journey.finished_at이 하나도 안 채워졌다 — 그 결과 "테스트 하기" 화면이 실제
+    실행 내내(길면 수십 분) 0%에 멈춰 있는 것처럼 보였다. index.json을 기다리지
+    않고 이미 도착한 개인 파일만으로 "끝났다"는 사실을 먼저 반영해 진행률이
+    실시간으로 움직이게 한다. 스텝 상세 등 나머지 데이터는 여전히 프로세스 종료
+    후 ingest_run()이 확정치로 덮어써 채운다.
+    """
+    if not log_dir.is_dir():
+        return
+    new_files = [p for p in log_dir.glob("*.json") if p.stem != "index" and p.stem not in seen]
+    if not new_files:
+        return
+    with session_scope() as session:
+        run = session.get(Run, run_id)
+        if run is None:
+            return
+        for p in new_files:
+            seen.add(p.stem)
+            persona = session.scalar(
+                select(Persona).where(Persona.test_id == run.test_id, Persona.code == p.stem)
+            )
+            if persona is None:
+                continue
+            journey = session.scalar(
+                select(Journey).where(Journey.run_id == run_id, Journey.persona_id == persona.id)
+            )
+            if journey is None or journey.finished_at is not None:
+                continue
+            try:
+                trace = json.loads(p.read_text(encoding="utf-8"))
+                journey.finished_at = dt.datetime.fromisoformat(trace["ended_at"])
+            except Exception:
+                journey.finished_at = dt.datetime.now(dt.timezone.utc)
+
+
 def start_pipeline_run(run_id: uuid.UUID) -> None:
     """백그라운드 스레드 진입점. 예외를 여기서 다 삼킨다 — 스레드 안 예외는 아무도 못 받고,
     그 사실만으로 서버가 죽으면 안 된다. 실패는 Run.status="failed" 로 화면에 드러난다.
@@ -178,22 +224,31 @@ def _run(run_id: uuid.UUID) -> None:
     if expect:
         args += ["--expect", expect]
 
-    result = subprocess.run(
-        args, cwd=AGENT_UX_DIR, capture_output=True, text=True, encoding="utf-8"
+    log_dir = LOGS_DIR / str(run_id)
+    seen: set[str] = set()
+    proc = subprocess.Popen(
+        args, cwd=AGENT_UX_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8",
     )
-    if result.returncode != 0:
+    while proc.poll() is None:
+        time.sleep(PROGRESS_POLL_SEC)
+        _mark_progress(run_id, log_dir, seen)
+    stdout, stderr = proc.communicate()
+    # 막 끝난 마지막 몇 명은 poll() 루프가 끝난 뒤에야 파일이 도착했을 수 있다.
+    _mark_progress(run_id, log_dir, seen)
+    returncode = proc.returncode
+    if returncode != 0:
         log.warning(
             "run.py 종료 코드 %s (run_id=%s)\nstdout:\n%s\nstderr:\n%s",
-            result.returncode, run_id, result.stdout[-2000:], result.stderr[-2000:],
+            returncode, run_id, stdout[-2000:], stderr[-2000:],
         )
 
-    log_dir = LOGS_DIR / str(run_id)
     with session_scope() as session:
         run = session.get(Run, run_id)
         if log_dir.exists():
             summary = ingest.ingest_run(session, run_id, log_dir)
             log.info("파이프라인 결과 적재: %s", summary)
-            run.status = "done" if result.returncode == 0 else "failed"
+            run.status = "done" if returncode == 0 else "failed"
 
             # 정답지(Defect)가 로드된 프로젝트(ux-testbed 기반)에서만 채점을 돌린다 —
             # static_scan은 testbed의 고정 6페이지 경로를 그대로 찔러보는 전용
