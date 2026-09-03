@@ -1,5 +1,6 @@
 import { clearToken, getToken } from '../lib/authToken'
 import { MOCK_MISS, mockResponse } from './mock'
+import { ApiError } from './errors'
 
 const BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
 
@@ -12,21 +13,13 @@ const USE_MOCK = (import.meta.env.VITE_MOCK ?? '1') !== '0'
 /** fetch 를 거치지 않는 것(예: <img src>)도 서버 주소가 필요하다. */
 export const API_BASE = BASE
 
-/** 서버가 돌려준 오류를 화면이 그대로 보여줄 수 있는 형태로 감싼다. */
-export class ApiError extends Error {
-  // 생성자 파라미터 프로퍼티는 erasableSyntaxOnly 에서 막히므로 필드로 따로 둔다.
-  status: number
-
-  constructor(message: string, status: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
+// 서버가 돌려준 오류를 화면이 그대로 보여줄 수 있는 형태로 감싼다.
+// 정의는 errors.ts에 있다(mock.ts도 같이 던져야 해서 — 순환 참조 설명은 그쪽에).
+export { ApiError }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (USE_MOCK) {
-    const canned = mockResponse(path, init)
+    const canned = await mockResponse(path, init)
     // 흉내 낼 수 없는 경로만 진짜 서버로 넘긴다. null 은 그 자체가 정상 응답일 수 있다
     // (예: 실행 중인 것이 없으면 /api/runs/active 는 null 을 돌려준다).
     if (canned !== MOCK_MISS) {

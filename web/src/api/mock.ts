@@ -15,6 +15,8 @@
  * 끄려면 web/.env 에 VITE_MOCK=0 을 넣고 진짜 백엔드를 띄운다.
  */
 import { MOCK_DATA } from './mock-data'
+import { getToken } from '../lib/authToken'
+import { ApiError } from './errors'
 
 /**
  * 실행만 진짜 파이프라인에 맡길지.
@@ -629,8 +631,30 @@ function analyzeMissionText(promptText: string) {
   }
 }
 
+/**
+ * LIVE_RUN일 때 실제 백엔드에서 이 사용자의 진짜 프로젝트 목록을 가져온다.
+ *
+ * 데모 카드는 로그인 여부와 무관하게 누구에게나 보여야 하는 전시물이라
+ * mock.ts 안에 고정으로 남겨둔다. 그 옆에 "이 사람이 실제로 만든 것"을
+ * 나란히 붙이려면 진짜 서버를 한 번 불러야 한다 — mockResponse 자체가 그래서
+ * 비동기다.
+ */
+async function realProjects(): Promise<Json[]> {
+  const token = getToken()
+  if (!token) return []
+  const base = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000'
+  try {
+    const res = await fetch(`${base}/api/projects`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!res.ok) return []
+    return (await res.json()) as Json[]
+  } catch {
+    // 실서버가 잠깐 안 닿아도 데모 카드는 떠야 한다 — 여기서 던지지 않는다.
+    return []
+  }
+}
+
 /** 경로별 응답. 흉내 낼 수 없으면 MOCK_MISS 를 돌려 호출부가 진짜 서버로 넘기게 한다. */
-export function mockResponse(rawPath: string, init?: RequestInit): unknown {
+export async function mockResponse(rawPath: string, init?: RequestInit): Promise<unknown> {
   const method = (init?.method ?? 'GET').toUpperCase()
   const body = init?.body ? (JSON.parse(String(init.body)) as Json) : null
   const [path, query = ''] = rawPath.split('?')
@@ -650,13 +674,29 @@ export function mockResponse(rawPath: string, init?: RequestInit): unknown {
   }
 
   // ── 프로젝트 ──────────────────────────────────────────────────
-  if (path === '/api/projects' && method === 'GET') return allSites().map(projectCard)
+  //
+  // 데모 3장(SITES)은 로그인 여부·LIVE_RUN 여부와 무관하게 늘 보인다 —
+  // "이 도구가 뭘 하는지" 보여주는 전시물이라 아무나 봐야 한다. LIVE_RUN이면
+  // 그 옆에 이 사용자가 실제로 만든 프로젝트를 진짜 서버에서 가져와 붙인다.
+  //
+  // 예전에는 "새 프로젝트 만들기"조차 브라우저 로컬(state.created)에만 쌓여서,
+  // LIVE_RUN을 켜도 새로 만든 프로젝트가 siteByTest()에 잡혀 데모처럼
+  // 재생되기만 했다 — 미션·인원수를 뭘 넣든 무시되고 늘 같은 결과만 떴다.
+  // 그래서 LIVE_RUN이면 생성·삭제 자체를 진짜 서버로 넘긴다(state.created에
+  // 안 쌓는다). 데모 SITES 3개만 siteByTest 대상으로 남아, 그 셋만 재생되고
+  // 나머지는 전부 진짜로 흐른다.
+  if (path === '/api/projects' && method === 'GET') {
+    const demo = SITES.map(projectCard)
+    if (!LIVE_RUN) return [...demo, ...state.created.map(projectCard)]
+    return [...demo, ...(await realProjects())]
+  }
 
-  // 이 자리에서 만든 프로젝트 지우기. 목록이 지저분해지면 치울 수 있어야 한다.
-  // 데모에 딸려 오는 세 개는 기록이 코드에 들어 있어서 지울 대상이 아니다 —
-  // 지운 척하고 다음 새로고침에 되살아나면 그게 더 나쁘다.
   if (path.startsWith('/api/projects/') && method === 'DELETE') {
     const id = path.split('/')[3] ?? ''
+    if (SITES.some((s) => s.id === id)) {
+      return { ok: false, message: '데모에 들어 있는 프로젝트는 지울 수 없어요.' }
+    }
+    if (LIVE_RUN) return MOCK_MISS
     if (!state.created.some((s) => s.id === id)) {
       return { ok: false, message: '데모에 들어 있는 프로젝트는 지울 수 없어요.' }
     }
@@ -665,6 +705,7 @@ export function mockResponse(rawPath: string, init?: RequestInit): unknown {
     return { ok: true }
   }
   if (path === '/api/projects' && method === 'POST') {
+    if (LIVE_RUN) return MOCK_MISS
     // **새 항목으로 쌓는다.** 원래 있던 데모 프로젝트는 건드리지 않는다.
     const url = normalizeUrl(String(body?.target_url ?? state.targetUrl))
     state.targetUrl = url
@@ -700,6 +741,17 @@ export function mockResponse(rawPath: string, init?: RequestInit): unknown {
   const listing = allSites().find((s) => path === `/api/projects/${s.id}/tests`)
   if (listing) {
     if (method === 'POST') {
+      // LIVE_RUN이면 이 시점의 listing은 반드시 데모 SITES 중 하나다(방금 만든
+      // 진짜 프로젝트는 실서버에만 있어 allSites()에 안 잡힌다). 예전엔 여기서
+      // 데모의 고정 testId를 그대로 돌려줘서, 사용자가 새로 적은 미션·인원수가
+      // 전부 무시되고 늘 같은 재생("코튼 셔츠 주문 완주")만 떴다 — 조용히
+      // 틀리는 대신 여기서 막고 이유를 말한다.
+      if (LIVE_RUN) {
+        throw new ApiError(
+          '데모 프로젝트에는 새 테스트를 추가할 수 없어요. "새 프로젝트 만들기"로 직접 만든 프로젝트에서 시도해 주세요.',
+          400,
+        )
+      }
       // 사용자가 붙인 이름을 버리면 진행 화면과 검토 화면이 엉뚱한 미션 이름을
       // 띄운다 — "위치 찾기"로 만들었는데 "표어 확인"이 뜨는 식이다.
       if (body?.name) state.testName = String(body.name)
@@ -966,9 +1018,10 @@ function stepsPayload(variant: string) {
     if (!site) {
       // 데모가 아니다 — 사용자가 직접 만든 진짜 프로젝트.
       if (LIVE_RUN) return MOCK_MISS
-      throw new Error(
+      throw new ApiError(
         '배포된 데모에는 실행할 서버가 붙어 있지 않아요. ' +
           '새로 만든 프로젝트는 로컬에서 돌려야 합니다.',
+        400,
       )
     }
     const run = runs[site.variant]
