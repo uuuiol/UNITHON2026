@@ -18,14 +18,14 @@ import { WizardFooter } from '../components/WizardFooter'
 import { useConnection } from '../hooks/useConnection'
 
 const SOURCES = [
-  { value: 'web', label: '웹 링크', icon: <img src={linkIcon} alt="" className="size-[14px]" /> },
+  { value: 'web_link', label: '웹 링크', icon: <img src={linkIcon} alt="" className="size-[14px]" /> },
   { value: 'github', label: '깃허브', icon: <img src={githubIcon} alt="" className="size-[19px]" /> },
   { value: 'apk', label: 'APK 파일', icon: <img src={apkIcon} alt="" className="size-[19px]" /> },
 ] as const
 
 export function NewProjectPage() {
   const navigate = useNavigate()
-  const [source, setSource] = useState<(typeof SOURCES)[number]['value']>('web')
+  const [source, setSource] = useState<(typeof SOURCES)[number]['value']>('web_link')
   const [name, setName] = useState('')
   const [device, setDevice] = useState(DEVICE_PRESETS[3].id) // 노트북 1280×800 — 기본 답사 환경
   const [category, setCategory] = useState<string>(CATEGORIES[0])
@@ -85,7 +85,7 @@ export function NewProjectPage() {
           {/* 지금 도는 것은 웹 링크뿐이다. 나머지를 눌렀을 때 아무 말도 없으면
               "왜 아무 일도 안 나지?" 하고 고장으로 읽힌다. 안 되는 것은
               안 된다고 먼저 말하는 편이 낫다. */}
-          {source !== 'web' ? (
+          {source !== 'web_link' ? (
             <div
               role="status"
               className="mt-[16px] flex max-w-[720px] items-start gap-[10px] rounded-[12px] border border-[#f0d9a8] bg-[#fdf7e8] px-[18px] py-[14px]"
@@ -100,7 +100,7 @@ export function NewProjectPage() {
                 실제 브라우저로 화면을 열어 조작하는 방식이라, 주소로 열리는 사이트가 필요해요.
                 <button
                   type="button"
-                  onClick={() => setSource('web')}
+                  onClick={() => setSource('web_link')}
                   className="ml-[6px] font-semibold text-main underline underline-offset-4"
                 >
                   웹 링크로 하기
