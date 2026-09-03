@@ -71,33 +71,37 @@ PROVIDERS = {
         },
         "price": {"input": 0.40, "output": 2.40},
     },
-    # Groq. 오픈소스 가중치 모델(Llama)을 무료 티어로 호스팅한다. OpenAI 호환.
-    # 2026-09 웹 조사 기준(그록 콘솔 직접 확인 전) 무료 티어 한도:
-    #   llama-3.1-8b-instant   : 30 RPM · 14,400 RPD · 6,000 TPM  · 500,000 TPD
-    #   llama-3.3-70b-versatile: 30 RPM ·  1,000 RPD · 12,000 TPM · 100,000 TPD
-    # explore는 스텝마다 불려서 호출·토큰 여유가 큰 8b를, goals/analyze는
-    # 실행당 몇 번뿐이라 한도가 빡빡해도 되는 70b를 쓴다.
-    # ⚠ 무료 티어라 price=0으로 두면 run.py의 --max-usd 예산 상한이 절대 안
-    #   걸린다(늘 $0 소진). 진짜 브레이크는 이 티어의 요청·토큰 한도이고,
-    #   넘으면 예산 초과가 아니라 429 에러로 실행이 실패한다.
-    # ⚠ 비전(답사/survey)용 모델은 이 조사 시점 기준 Groq 활성 모델 목록에
-    #   없었다 — 지금은 --no-map(답사 미연결)이라 안 쓰이지만, 답사를 나중에
-    #   연결하면 model_survey를 다른 프로바이더로 갈아끼워야 한다.
+    # Groq. 오픈웨이트 모델을 호스팅한다. OpenAI 호환.
+    # 2026-09-03 check-llm.py --list 로 이 키에서 실제 접근되는 모델만 확인 후
+    # 고름 — 웹에서 조사했던 llama-3.1-8b-instant/llama-3.3-70b-versatile은
+    # 이 계정에서 404였다(계정마다 열린 모델이 다를 수 있음. 바뀌면
+    # `python check-llm.py --list`로 다시 확인할 것).
+    #   gpt-oss-20b  : OpenAI가 공개한 오픈웨이트 모델. 100만 토큰당 $0.075/$0.30
+    #   gpt-oss-120b : 같은 계열 대형판. 100만 토큰당 $0.15/$0.60
+    # explore는 스텝마다 불려서 저가 20b, goals/analyze는 실행당 소수 호출이라
+    # 120b. Groq는 신용카드 없이 가입되고 무료 티어 요청·토큰 한도가 있지만
+    # (여기 적힌 단가는 그 한도를 넘는 유료 구간 기준), 이 한도의 정확한 값은
+    # 계정마다 달라 콘솔에서 직접 확인 전이다.
+    # ⚠ price를 0이 아니라 실제 단가로 채워야 run.py의 --max-usd 예산 상한이
+    #   제대로 걸린다 — 0으로 두면 이 상한이 죽는다(이전 버전의 실수).
+    # ⚠ 비전(답사/survey)용 모델은 이 목록에 없다 — 지금은 --no-map(답사
+    #   미연결)이라 안 쓰이지만, 답사를 나중에 연결하면 model_survey를 다른
+    #   프로바이더로 갈아끼워야 한다.
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "key_env": "GROQ_API_KEY",
         "fallbacks": {
-            "explore": ["llama-3.3-70b-versatile"],
+            "explore": ["gpt-oss-120b"],
         },
-        "model_survey":  "llama-3.3-70b-versatile",  # 비전 아님 — 답사 연결 전까지 미사용
-        "model_goals":   "llama-3.3-70b-versatile",
-        "model_explore": "llama-3.1-8b-instant",
-        "model_analyze": "llama-3.3-70b-versatile",
+        "model_survey":  "gpt-oss-120b",  # 비전 아님 — 답사 연결 전까지 미사용
+        "model_goals":   "gpt-oss-120b",
+        "model_explore": "gpt-oss-20b",
+        "model_analyze": "gpt-oss-120b",
         "prices": {
-            "llama-3.1-8b-instant":    {"input": 0.0, "output": 0.0},
-            "llama-3.3-70b-versatile": {"input": 0.0, "output": 0.0},
+            "gpt-oss-20b":  {"input": 0.075, "output": 0.30},
+            "gpt-oss-120b": {"input": 0.15,  "output": 0.60},
         },
-        "price": {"input": 0.0, "output": 0.0},
+        "price": {"input": 0.075, "output": 0.30},
     },
 }
 
