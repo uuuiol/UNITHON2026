@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import chevronDownIcon from '../assets/icons/chevron-down.svg'
 import avatar from '../assets/img/avatar.png'
+import { getAccount } from '../api/client'
+import { useQuery } from '../api/hooks'
 import { clearToken } from '../lib/authToken'
 
 /**
@@ -14,6 +16,12 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  // 로그인한 실제 계정. 하드코딩된 "영찬"을 여기 박아뒀던 게 이전 버전의
+  // 버그였다 — 누가 가입해도 항상 같은 이름·이메일이 떴다.
+  const account = useQuery(getAccount, [])
+  const name = account.data?.name ?? ''
+  const email = account.data?.email ?? ''
+  const planLabel = account.data?.plan_label ?? ''
 
   // 바깥을 누르거나 Esc 를 누르면 닫는다. 열어 둔 채로 다른 곳을 누르면
   // 메뉴가 화면에 남아 무엇이 눌린 것인지 알 수 없다.
@@ -62,8 +70,8 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
         <img src={avatar} alt="" className="size-[35px] rounded-full object-cover" />
         {collapsed ? null : (
           <>
-            <span className="text-[20px] text-ink">영찬</span>
-            <span className="text-[13px] leading-[1.45] font-medium text-subtext">Pro</span>
+            <span className="text-[20px] text-ink">{name}</span>
+            <span className="text-[13px] leading-[1.45] font-medium text-subtext">{planLabel}</span>
             <img
               src={chevronDownIcon}
               alt=""
@@ -81,8 +89,8 @@ export function ProfileMenu({ collapsed = false }: { collapsed?: boolean }) {
           }`}
         >
           <div className="px-[16px] pt-[8px] pb-[10px]">
-            <p className="text-[14px] font-semibold text-heading">영찬</p>
-            <p className="mt-[3px] truncate text-[12px] text-muted">youngchan@example.com</p>
+            <p className="text-[14px] font-semibold text-heading">{name}</p>
+            <p className="mt-[3px] truncate text-[12px] text-muted">{email}</p>
           </div>
           <div className="h-px bg-divider" />
           <MenuItem onClick={() => go('/settings')}>계정 설정</MenuItem>
