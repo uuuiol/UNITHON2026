@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError } from './client'
+import { ApiError, getActiveRun, type ActiveRun } from './client'
 
 type QueryState<T> = {
   data: T | undefined
@@ -53,6 +53,43 @@ export function useQuery<T>(fetcher: () => Promise<T>, deps: unknown[] = []): Qu
   const reload = useCallback(() => setNonce((n) => n + 1), [])
 
   return { data, loading, error, reload }
+}
+
+const ACTIVE_RUN_POLL_MS = 3000
+
+/**
+ * 진행중인 실행을 주기적으로 다시 묻는다.
+ *
+ * 프로젝트 목록/상세 화면의 진행 배너가 `useQuery(getActiveRun)`로 **한 번만**
+ * 물어서, 실행이 끝나거나 계속 진행돼도 처음 값(예: 0%)에 배너가 멈춰 있던
+ * 문제가 있었다 — RunningPage.tsx와 같은 뿌리지만 다른 화면에서 또 터진 것.
+ * 여기서는 완료 시 100%로 마무리할 필요가 없다 — null이 오면 그냥 배너가
+ * 사라지고, 아래 목록에 방금 끝난 테스트가 나타난다.
+ */
+export function useActiveRunPoll(): ActiveRun | null {
+  const [run, setRun] = useState<ActiveRun | null>(null)
+
+  useEffect(() => {
+    let alive = true
+
+    const tick = async () => {
+      try {
+        const next = await getActiveRun()
+        if (alive) setRun(next)
+      } catch {
+        // 폴링 실패는 화면을 깨뜨리지 않는다. 다음 주기에 다시 시도한다.
+      }
+    }
+
+    void tick()
+    const timer = window.setInterval(tick, ACTIVE_RUN_POLL_MS)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  return run
 }
 
 /** 쓰기용. 진행 상태와 실패 사유만 돌려준다. */

@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getActiveRun, getProject, listTests, type TestStats } from '../api/client'
-import { useQuery } from '../api/hooks'
+import { getProject, listTests, type TestStats } from '../api/client'
+import { useActiveRunPoll, useQuery } from '../api/hooks'
 import iosArrowIcon from '../assets/icons/ios-arrow.svg'
 import { AppLayout, PageBody } from '../components/AppLayout'
 import { Button } from '../components/Button'
@@ -26,9 +26,25 @@ export function ProjectDetailPage() {
 
   const project = useQuery(() => getProject(projectId), [projectId])
   const tests = useQuery(() => listTests(projectId), [projectId])
-  const active = useQuery(getActiveRun)
+  const active = useActiveRunPoll()
 
-  const running = active.data?.project_id === projectId ? active.data : null
+  const running = active?.project_id === projectId ? active : null
+
+  // 실행이 막 끝나면(진행중 → null) 배너가 사라지는데, 그 순간 방금 끝난
+  // 테스트가 아래 목록에는 아직 없다 — 목록도 같이 다시 물어야 바로 나타난다.
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (running) {
+      wasRunning.current = true
+      return
+    }
+    if (wasRunning.current) {
+      wasRunning.current = false
+      tests.reload()
+      project.reload()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running])
 
   if (project.loading) {
     return (

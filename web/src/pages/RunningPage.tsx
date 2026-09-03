@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { API_BASE, getActiveRun, getProject, type ActiveRun } from '../api/client'
+import { getActiveRun, getProject, type ActiveRun } from '../api/client'
 import { useQuery } from '../api/hooks'
 import arrowIcon from '../assets/icons/arrow.svg'
 import { AppLayout, PageBody } from '../components/AppLayout'
@@ -147,22 +147,11 @@ export function RunningPage() {
             <img src={arrowIcon} alt="" aria-hidden className="size-[15px] invert" />
           </button>
 
-          {/* [임시] 답사자가 본 화면.
-              첫 페르소나만 스크린샷을 찍어 사이트 설명서를 만들고, 뒤따르는
-              페르소나들은 이미지 없이 그 설명서와 계산된 수치만 읽는다.
-              그 차이를 눈으로 확인하라고 열어둔 통로다. 결과 화면이 생기면
-              그쪽으로 옮긴다. */}
-          {/* 재생 중에는 띄우지 않는다. 배포본에는 그 스크린샷을 내줄 서버가 없다. */}
-          {replaying ? null : (
-            <a
-              href={`${API_BASE}/shots`}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-[14px] text-[15px] text-subtext underline underline-offset-4 hover:text-ink"
-            >
-              답사자가 본 화면 보기 (스크린샷)
-            </a>
-          )}
+          {/* [빠짐] 답사자가 본 화면 링크는 원래 로컬 개발 중 agent-ux/server.py를
+              띄워 두고 보는 임시 통로였다 — 그 스크린샷 서버는 AWS 배포본에는
+              애초에 붙어 있지 않다(진짜 실행은 orchestrate.py가 다른 경로로
+              돌린다). 안 쓰는 링크를 남겨 두면 눌렀을 때 404만 본다 — 실제로
+              보여줄 화면이 생기면 그때 다시 연결한다. */}
         </div>
       </PageBody>
     </AppLayout>

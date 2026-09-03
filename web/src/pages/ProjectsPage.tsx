@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { deleteProject, getActiveRun, listProjects, type ProjectCard } from '../api/client'
-import { useQuery } from '../api/hooks'
+import { deleteProject, listProjects, type ProjectCard } from '../api/client'
+import { useActiveRunPoll, useQuery } from '../api/hooks'
 import moreIcon from '../assets/icons/more.svg'
 import { AppLayout, PageBody, PageHeading } from '../components/AppLayout'
 import { Button } from '../components/Button'
@@ -24,7 +24,22 @@ export function ProjectsPage() {
   const [tab, setTab] = useState<TabValue>('recent')
 
   const projects = useQuery(listProjects)
-  const active = useQuery(getActiveRun)
+  const active = useActiveRunPoll()
+
+  // 실행이 막 끝나면(진행중 → null) 배너가 사라지는데, 방금 끝난 테스트로
+  // 카드의 개수·성공률이 바뀌었을 수 있다 — 목록도 같이 다시 물어야 한다.
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (active) {
+      wasRunning.current = true
+      return
+    }
+    if (wasRunning.current) {
+      wasRunning.current = false
+      projects.reload()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active])
 
   const groups = useMemo(() => {
     const rows = projects.data ?? []
@@ -43,19 +58,17 @@ export function ProjectsPage() {
     <AppLayout>
       <PageBody>
         <div className="mx-auto max-w-[1442px]">
-          {active.data ? (
+          {active ? (
             <div className="mb-[45px]">
               <RunProgressBanner
                 progress={{
-                  projectName: active.data.project_name,
-                  testName: active.data.test_name,
-                  done: active.data.done,
-                  total: active.data.total,
-                  percent: active.data.percent,
+                  projectName: active.project_name,
+                  testName: active.test_name,
+                  done: active.done,
+                  total: active.total,
+                  percent: active.percent,
                 }}
-                onOpen={() =>
-                  navigate(`/projects/${active.data?.project_id}/tests/new/running`)
-                }
+                onOpen={() => navigate(`/projects/${active.project_id}/tests/new/running`)}
               />
             </div>
           ) : null}
