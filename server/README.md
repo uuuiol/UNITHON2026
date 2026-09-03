@@ -116,6 +116,7 @@ llm_call ── run / journey / step
 | 종료 사유를 여섯 가지로 나눈다 | `termination_reason` ENUM 6종 + `journey_achieved_matches_reason` CHECK. 예산 상한(`budget_cap`)은 이탈률 집계에서 빠진다. |
 | 탐색 중에는 결함 분석을 시키지 않는다 | `finding` 은 `scorer_version` 을 필수로 받는다. 실행 경로에는 이 테이블에 쓰는 코드가 없다. |
 | 정상판을 대조군으로 같이 돌린다 | `POST /api/projects` 가 clean/flawed 두 변형을 항상 함께 만든다. `run` 의 `UNIQUE (test_id, arm)` 이 A/B/C/D 를 한 벌로 고정한다. |
+| 진행률은 사람 수로 세지, arm 수로 세지 않는다 | 대조군 설계상 페르소나 N명은 arm(결함판/정상판)마다 한 번씩, 실제로는 2N번 돈다. 하지만 "N명 설정 → 화면에 2N명"으로 보이면 두 배로 잘못 돈 것처럼 헷갈린다(2026-09-03 실측 — 3명 설정에 "0/6명"으로 보임). `GET /api/runs/active`(api.py::active_run)는 그래서 Journey를 persona_id로 묶어, 그 사람의 **모든** arm이 끝나야 그 사람을 "마쳤다"고 센다 — 총원도 N(사람 수)이지 2N이 아니다. |
 | 이미지는 답사 한 번에만 | `llm_call` 의 `CHECK (stage <> 'explore' OR modality = 'text')`. 스텝마다 이미지를 넣는 코드가 들어오면 즉시 터진다. |
 | 예상 호출 수를 보여준 뒤 한 번 더 묻는다 | `run` 의 `CHECK (persona_count <= 1 OR confirmed_at IS NOT NULL)`. 확인 없이 100명이 도는 경로가 없다. |
 | 375px 3건은 원리적으로 못 잡는다 | `defect.requires_viewport_w`. `scoring.py` 가 재현율 분모에서 뺀다 — '못 잡음'과 '잡을 수 없음'을 섞지 않는다. |

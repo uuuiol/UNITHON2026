@@ -714,12 +714,33 @@ def active_run(
         session.scalars(select(Run).where(Run.test_id == test.id, Run.status == "running"))
     )
     run_ids = [r.id for r in running_runs]
-    done = session.scalar(
-        select(func.count(Journey.id)).where(
-            Journey.run_id.in_(run_ids), Journey.finished_at.is_not(None)
+
+    # "3명 설정하면 3명"이어야 한다 — arm(결함판/정상판)마다 같은 3명을 한 번씩
+    # 더 돌리는 것은 맞지만(대조군 설계, server/README.md "정상판을 대조군으로
+    # 같이 돌린다"), 사람은 3명이지 6명이 아니다. arm 수만큼 곱해서 보여주면
+    # "3명 설정했는데 왜 6명" 으로 보인다(2026-09-03 실측 혼란). 그래서 총원은
+    # 사람(persona) 단위로 세고, 한 사람은 그 사람의 모든 arm이 다 끝나야
+    # "마쳤다"고 센다 — 한쪽만 끝나면 아직 그 사람의 비교 결과가 안 나온 것이라
+    # 반쪽짜리 완료로 셀 수 없다.
+    by_persona = (
+        select(
+            Journey.persona_id,
+            func.count(Journey.id).label("arms"),
+            func.count(Journey.finished_at).label("done_arms"),
         )
-    ) or 0
-    total = sum(r.persona_count for r in running_runs)
+        .where(Journey.run_id.in_(run_ids))
+        .group_by(Journey.persona_id)
+        .subquery()
+    )
+    total = session.scalar(select(func.count()).select_from(by_persona)) or 0
+    done = (
+        session.scalar(
+            select(func.count())
+            .select_from(by_persona)
+            .where(by_persona.c.arms == by_persona.c.done_arms)
+        )
+        or 0
+    )
 
     return {
         "run_id": str(run.id),
