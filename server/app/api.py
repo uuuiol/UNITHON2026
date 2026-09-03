@@ -20,6 +20,7 @@ from .estimates import DEFAULT_PAGE_COUNT, estimate
 from .journeys import (
     DROP_REASONS,
     build_diagram,
+    build_replay,
     build_steps_payload,
     compared_persona_rows,
     group_paths,
@@ -880,7 +881,8 @@ def test_steps(
     test = _owned_test(test_id, user, session)
     primary = _primary_run(test_id, session)
     walks = load_walks(session, None, run_id=primary.id) if primary else []
-    return build_steps_payload(walks, test.name)
+    replay = build_replay(session, primary) if primary else {}
+    return build_steps_payload(walks, test.name, replay)
 
 
 # --------------------------------------------------------------------------- #
@@ -966,7 +968,9 @@ def live_steps(
 ) -> dict:
     run = _owned_run(run_id, user, session)
     test = _load_test(run.test_id, session)
-    return build_steps_payload(load_walks(session, None, run_id=run.id), test.name)
+    return build_steps_payload(
+        load_walks(session, None, run_id=run.id), test.name, build_replay(session, run)
+    )
 
 
 @router.post("/runs/{run_id}/score")

@@ -85,6 +85,24 @@ def _parse_dt(raw: str | None) -> datetime | None:
     return datetime.fromisoformat(raw) if raw else None
 
 
+def apply_trace_to_journey(
+    journey: Journey, log_path: Path, trace: dict, summary: IngestSummary | None = None
+) -> None:
+    """trace(페르소나 한 명의 기록 파일) 하나를 journey 필드에 반영한다. Step은 안 건드린다.
+
+    orchestrate.py가 실행 도중(아직 index.json이 없을 때) 방금 끝난 사람 하나만
+    빠르게 반영하려고 이 조각만 따로 뗐다 — Step까지 채우면(특히 스텝이 많을 때)
+    폴링 주기마다 매번 비용이 커지고, 진행률 표시엔 애초에 필요하지도 않다.
+    ingest_run()은 이 다음에 Step까지 마저 채운다.
+    """
+    journey.termination_reason = _map_end_reason(trace["end_reason"], summary or IngestSummary(run_id=journey.run_id))
+    journey.goal_achieved = trace["end_reason"] == "goal_reached"
+    journey.step_count = len(trace["steps"])
+    journey.log_path = str(log_path)
+    journey.started_at = _parse_dt(trace.get("started_at"))
+    journey.finished_at = _parse_dt(trace.get("ended_at"))
+
+
 def ingest_run(session: Session, run_id: uuid.UUID, log_dir: Path) -> IngestSummary:
     run = session.get(Run, run_id)
     if run is None:
@@ -120,12 +138,7 @@ def ingest_run(session: Session, run_id: uuid.UUID, log_dir: Path) -> IngestSumm
             session.add(journey)
             session.flush()  # journey.id 를 Step 이 참조하려면 먼저 있어야 한다
 
-        journey.termination_reason = _map_end_reason(trace["end_reason"], summary)
-        journey.goal_achieved = trace["end_reason"] == "goal_reached"
-        journey.step_count = len(trace["steps"])
-        journey.log_path = str(log_dir / entry["file"])
-        journey.started_at = _parse_dt(trace.get("started_at"))
-        journey.finished_at = _parse_dt(trace.get("ended_at"))
+        apply_trace_to_journey(journey, log_dir / entry["file"], trace, summary)
         session.flush()
 
         # 재실행해도 같은 결과가 나오도록, 기존 스텝을 지우고 다시 채운다.

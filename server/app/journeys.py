@@ -11,14 +11,18 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import unquote, urlparse, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Journey, Persona, Run, Step
+from . import orchestrate
+from .models import Journey, Persona, Run, Step, Test
 from .pipeline_export import SENTENCES
 
 #: 이탈로 세는 종료 사유. api.py 의 이탈률과 같은 정의를 쓴다 —
@@ -446,19 +450,166 @@ def _step_persona(walk: Walk, screen: Screen | None) -> dict:
     }
 
 
-def build_steps_payload(walks: list[Walk], test_name: str) -> dict:
+# --------------------------------------------------------------------------- #
+# 재생(replay) — 한 사람의 여정을 처음부터 끝까지
+# --------------------------------------------------------------------------- #
+#
+# agent-ux/export_web_mock.py::build_views()가 데모용으로 미리 한 번 뽑아 두던
+# 바로 그 로직이다 — 실제 실행 기록에서 뽑는다는 점은 다르지 않다(그 파일
+# 맨 위 주석: "숫자를 손으로 적지 않는다 — 실제 실행 기록에서 읽는다"). 다른 점은
+# 그건 오프라인 스크립트로 한 번 돌려 mock-data.ts에 굳혀 두는 것이었고, 여기는
+# 요청이 올 때마다 Journey.log_path가 가리키는 그 기록 파일을 그 자리에서 읽는다 —
+# 그래야 실행이 도는 도중에 막 끝난 사람도 곧바로 재생된다.
+#
+# 스텝마다 스크린샷을 새로 찍지 않는다(설계상 그렇다 — 페르소나는 글로만
+# 움직인다). 대신 답사(survey.py)가 화면 종류당 뷰포트 높이만큼 스크롤하며
+# 찍어 둔 사진 여러 장(survey.py의 shoot()) 중, 그 스텝의 실제 스크롤 위치에
+# 가장 가까운 한 장을 골라 쓴다. 클릭 좌표(box)는 페이지 절대좌표라 그대로 얹힌다.
+
+#: agent-ux/uxagent/config.py의 VIEWPORT와 반드시 같은 값이어야 한다 — 답사가
+#: 실제로 그 크기로 스크롤·촬영했다는 전제 위에서 어느 장을 고를지 계산한다.
+_VIEWPORT_W = 1280
+_VIEWPORT_H = 800
+
+
+def _shot_key(url: str, root: str) -> str:
+    """agent-ux/survey.py::survey_page()가 스크린샷 파일명에 쓰는 규칙을 그대로 옮긴 것.
+
+    uxagent/discover.py의 rel_path() + survey_page()의 safe 변환을 합친 것이다 —
+    거기가 실제로 파일을 그 이름으로 저장하므로, 여기서 어긋나면 사진을 못 찾는다.
+    """
+    base_dir = urlparse(root).path.rstrip("/") + "/"
+    s = urlsplit(url)
+    p = s.path
+    if p.startswith(base_dir):
+        p = "/" + p[len(base_dir):]
+    rel = p + (f"?{s.query}" if s.query else "")
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in unquote(rel))[:60]
+    return safe.strip("_") or "page"
+
+
+def _shots_for(stem: str, key: str) -> list[str]:
+    """SHOTS_DIR/<stem>/<key>__N.png 를 N(스크롤 순서) 순으로. 없으면 빈 목록."""
+    d = orchestrate.SHOTS_DIR / stem
+    if not d.is_dir():
+        return []
+    def _n(p: Path) -> int:
+        try:
+            return int(p.stem.rsplit("__", 1)[-1])
+        except (ValueError, IndexError):
+            return 0
+    return [p.name for p in sorted(d.glob(f"{key}__*.png"), key=_n)]
+
+
+def _replay_frames(trace: dict, root: str, stem: str) -> list[dict]:
+    frames = []
+    for i, s in enumerate(trace.get("steps") or []):
+        snap = s.get("snapshot") or {}
+        url = snap.get("url") or ""
+        key = _shot_key(url, root)
+        filenames = _shots_for(stem, key)
+
+        shot = None
+        # 답사가 찍어둔 여러 장 중 이 스텝의 스크롤 위치와 가장 가까운 장 —
+        # scroll_y를 그 장의 기준 스크롤(shot_baseline)로 다시 쓴다. frame.box는
+        # 페이지 절대좌표를 그대로 두므로, 프런트의 (box.y - scroll_y) 계산이
+        # "그 장 안에서의 위치"로 정확히 맞아떨어진다(실제 스크롤값을 그대로
+        # 쓰면 안 고른 장 기준으로 어긋난다).
+        raw_scroll = snap.get("scroll_y") or 0
+        scroll_for_frame = raw_scroll
+        if filenames:
+            idx = min(len(filenames) - 1, max(0, raw_scroll // _VIEWPORT_H))
+            shot = {"src": f"/api/shots/{stem}/{filenames[idx]}", "w": _VIEWPORT_W, "h": _VIEWPORT_H}
+            scroll_for_frame = idx * _VIEWPORT_H
+
+        r = s.get("resolved") or {}
+        outcome = s.get("outcome") or {}
+        action = s.get("action") or {}
+        frames.append({
+            "step": i + 1,
+            "screen": key,
+            "title": key,
+            "shot": shot,
+            "scroll_y": scroll_for_frame,
+            "viewport": snap.get("viewport") or {"w": _VIEWPORT_W, "h": _VIEWPORT_H},
+            "thought": s.get("thought") or "",
+            "action": action.get("type") or "",
+            "target": (r.get("text") or "")[:30],
+            "box": ({"x": round(r["x"]), "y": round(r["y"]),
+                     "w": round(r["w"]), "h": round(r["h"])} if r else None),
+            "changed": bool(outcome.get("changed")),
+            "note": outcome.get("note") or "",
+            "blocked": bool(s.get("blocked_action")),
+            "elapsed_ms": s.get("elapsed_ms"),
+        })
+    return frames
+
+
+def build_replay(session: Session, run: Run) -> dict[str, dict]:
+    """이 실행의 페르소나별 전체 여정. 프런트의 ReplayStage/PersonaReplayModal이 쓴다.
+
+    아직 안 끝난 실행이어도 된다 — Journey.log_path는 그 사람이 끝나는 즉시
+    (orchestrate.py의 _mark_progress) 채워지므로, 방금 끝난 사람은 나머지가
+    도는 중에도 곧바로 재생된다.
+    """
+    test = session.get(Test, run.test_id)
+    if test is None or not test.target_url:
+        return {}
+    root = orchestrate.target_root(test.target_url)
+    stem = orchestrate._map_stem(test.target_url)
+
+    journeys = list(
+        session.scalars(
+            select(Journey).where(Journey.run_id == run.id, Journey.log_path.is_not(None))
+        )
+    )
+    if not journeys:
+        return {}
+    personas = {
+        p.id: p
+        for p in session.scalars(
+            select(Persona).where(Persona.id.in_([j.persona_id for j in journeys]))
+        )
+    }
+
+    out: dict[str, dict] = {}
+    for journey in journeys:
+        persona = personas.get(journey.persona_id)
+        if persona is None:
+            continue
+        try:
+            trace = json.loads(Path(journey.log_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        frames = _replay_frames(trace, root, stem)
+        out[persona.code] = {
+            "id": persona.code,
+            "label": display_name(persona.code),
+            "traits": {axis: getattr(persona.trait_combo, axis) for axis in AXIS_LABEL},
+            "age_band": persona.age_band,
+            "gender": persona.gender,
+            "outcome": "success" if journey.goal_achieved else "drop",
+            "end_label": END_LABEL.get(journey.termination_reason or "", "진행 중"),
+            "steps": len(frames),
+            "synthetic": False,
+            "frames": frames,
+        }
+    return out
+
+
+def build_steps_payload(walks: list[Walk], test_name: str, replay: dict[str, dict] | None = None) -> dict:
     """스텝별 막대 + 필름스트립. build_diagram 과 같은 (position, screen_key) 서명을 쓴다 —
     두 화면의 숫자가 어긋나면 안 되기 때문이다.
 
     클릭 좌표·스크린샷은 DB에 없어서(찍는 코드가 없다) clicks/screen_clicks 는 빈 배열,
-    shot 은 null 로 정직하게 비워 둔다. replay(전체 여정 재생)도 같은 이유로 뺀다 —
-    화면 타입에서 둘 다 선택적(optional) 필드라 없어도 깨지지 않는다.
+    shot 은 null 로 정직하게 비워 둔다 — 이 둘은 화면 타입에서 선택적(optional)
+    필드라 없어도 깨지지 않는다. replay는 build_replay()가 따로 만들어 여기 얹는다.
     """
     picked = [w for w in walks if w.screens]
     if not picked:
         return {
             "steps": {}, "filmstrip": [], "sentences": SENTENCES, "axes": AXIS_LABEL,
-            "test_name": test_name,
+            "test_name": test_name, "replay": replay or {},
         }
 
     depth = min(MAX_COLUMNS, max(len(w.screens) for w in picked))
@@ -512,4 +663,5 @@ def build_steps_payload(walks: list[Walk], test_name: str) -> dict:
         "sentences": SENTENCES,
         "axes": AXIS_LABEL,
         "test_name": test_name,
+        "replay": replay or {},
     }

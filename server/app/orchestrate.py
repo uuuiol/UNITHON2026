@@ -73,6 +73,20 @@ SURVEY_MAX_PAGES = "6"
 _MAP_STEM_MAX_LEN = 150
 
 
+def target_root(url: str) -> str:
+    """uxagent.config.resolve_target()의 --url 갈래가 만드는 root를 그대로 옮긴 것.
+
+    root는 "이 페이지가 속한 디렉터리"다(주소의 마지막 조각을 뗀 것) —
+    답사 범위(scope)도, 지도·스크린샷 캐시 키(_map_stem)도, journeys.py가
+    스텝의 URL을 답사 스크린샷 파일명과 맞춰볼 때도 전부 같은 이 root를
+    기준으로 삼는다. 하나만 어긋나면 나머지 전부가 어긋난다.
+    """
+    clean = url if "://" in url else "https://" + url
+    parts = urlsplit(clean)
+    origin = f"{parts.scheme}://{parts.netloc}" if parts.netloc else clean
+    return clean.rsplit("/", 1)[0] if clean.count("/") > 2 else origin
+
+
 def _map_stem(url: str) -> str:
     """uxagent.config.map_stem()의 --url 갈래를 그대로 옮긴 것.
 
@@ -86,11 +100,7 @@ def _map_stem(url: str) -> str:
     테스트베드의 clean/flawed 등)가 지도·스크린샷 캐시를 공유해 서로
     덮어썼다(2026-09-03 실측) — 그래서 경로까지 포함한 root를 키로 쓴다.
     """
-    clean = url if "://" in url else "https://" + url
-    parts = urlsplit(clean)
-    origin = f"{parts.scheme}://{parts.netloc}" if parts.netloc else clean
-    root = clean.rsplit("/", 1)[0] if clean.count("/") > 2 else origin
-    raw_name = root.split("//", 1)[-1]
+    raw_name = target_root(url).split("//", 1)[-1]
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in raw_name)
     return (safe.strip("_") or "site")[:_MAP_STEM_MAX_LEN]
 
@@ -139,7 +149,7 @@ def _ensure_site_map(target_url: str, run_id: uuid.UUID) -> bool:
 
 
 def _mark_progress(run_id: uuid.UUID, log_dir: Path, seen: set[str]) -> None:
-    """log_dir에 새로 나타난 <페르소나 코드>.json을 Journey.finished_at에 즉시 반영한다.
+    """log_dir에 새로 나타난 <페르소나 코드>.json을 Journey에 즉시 반영한다.
 
     trace.py의 Trace.finish()는 "한 명 끝날 때마다 즉시 저장한다"고 스스로 밝히듯
     페르소나 한 명이 끝나는 즉시 <code>.json을 쓴다 — index.json(전체 요약)만
@@ -147,9 +157,13 @@ def _mark_progress(run_id: uuid.UUID, log_dir: Path, seen: set[str]) -> None:
     index.json이 있어야만 동작해서, run.py 서브프로세스가 끝날 때까지 DB의
     Journey.finished_at이 하나도 안 채워졌다 — 그 결과 "테스트 하기" 화면이 실제
     실행 내내(길면 수십 분) 0%에 멈춰 있는 것처럼 보였다. index.json을 기다리지
-    않고 이미 도착한 개인 파일만으로 "끝났다"는 사실을 먼저 반영해 진행률이
-    실시간으로 움직이게 한다. 스텝 상세 등 나머지 데이터는 여전히 프로세스 종료
-    후 ingest_run()이 확정치로 덮어써 채운다.
+    않고 이미 도착한 개인 파일만으로 반영해 진행률이 실시간으로 움직이게 한다.
+
+    ingest.apply_trace_to_journey()로 log_path까지 같이 채운다 — journeys.py의
+    build_replay()가 이 log_path로 트레이스 파일을 찾으므로, 이걸 비워두면
+    방금 끝난 사람의 "여정 재생"이 실행이 다 끝날 때까지 나타나지 않는다.
+    Step(스텝 상세)만 건너뛴다 — 폴링마다 다시 채우기엔 비싸고, 흐름도·경로
+    카드는 실행이 끝난 뒤 ingest_run()이 한 번에 채워도 늦지 않는다.
     """
     if not log_dir.is_dir():
         return
@@ -174,7 +188,7 @@ def _mark_progress(run_id: uuid.UUID, log_dir: Path, seen: set[str]) -> None:
                 continue
             try:
                 trace = json.loads(p.read_text(encoding="utf-8"))
-                journey.finished_at = dt.datetime.fromisoformat(trace["ended_at"])
+                ingest.apply_trace_to_journey(journey, p, trace)
             except Exception:
                 journey.finished_at = dt.datetime.now(dt.timezone.utc)
 

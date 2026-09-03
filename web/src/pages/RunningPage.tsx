@@ -1,9 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { API_BASE, getActiveRun, getProject, type ActiveRun } from '../api/client'
+import {
+  API_BASE,
+  getActiveRun,
+  getProject,
+  getTestSteps,
+  type ActiveRun,
+  type PersonaReplay,
+} from '../api/client'
 import { useQuery } from '../api/hooks'
 import arrowIcon from '../assets/icons/arrow.svg'
 import { AppLayout, PageBody } from '../components/AppLayout'
+import { PersonaFace, usePersonaLabel } from '../components/PersonaIdentity'
+import { PersonaReplayModal } from '../components/PersonaReplayModal'
 import { WizardTopBar } from '../components/StepIndicator'
 import { estimateRun } from '../lib/estimate'
 import { mapStem } from '../lib/mapStem'
@@ -23,6 +32,13 @@ export function RunningPage() {
   const project = useQuery(() => getProject(projectId), [projectId])
   const [run, setRun] = useState<ActiveRun | null>(null)
   const replaying = run?.replay ?? false
+
+  // 방금 끝난 페르소나부터 하나씩 재생해 볼 수 있게 한다. Journey.log_path는
+  // 그 사람이 끝나는 즉시 채워지므로(orchestrate.py의 _mark_progress), 전체
+  // 실행이 끝나길 기다리지 않고도 먼저 끝난 사람은 바로 재생된다.
+  const [personaReplays, setPersonaReplays] = useState<Record<string, PersonaReplay>>({})
+  const [replayId, setReplayId] = useState<string | null>(null)
+  const label = usePersonaLabel()
   // 서버는 "도는 중"인 실행만 돌려준다 — A/B 두 arm이 모두 done 이 되는
   // 순간 /api/runs/active 는 null 로 뒤집힌다. 그걸 그대로 반영하면
   // done/total 이 0/0 이 되어 진행바가 100% 문턱에서 0%로 되감긴 것처럼
@@ -41,6 +57,15 @@ export function RunningPage() {
         if (next) {
           lastRunRef.current = next
           setRun(next)
+          if (next.run_id) {
+            // steps 엔드포인트가 흐름도·경로까지 계산하니 무거울 수 있다.
+            // 실패해도(아직 하나도 안 끝났으면 빈 값) 진행률 자체는 안 깨진다.
+            getTestSteps(next.test_id ?? '', undefined, next.run_id)
+              .then((payload) => {
+                if (alive) setPersonaReplays(payload.replay ?? {})
+              })
+              .catch(() => {})
+          }
           return
         }
         const last = lastRunRef.current
@@ -148,8 +173,38 @@ export function RunningPage() {
             <img src={arrowIcon} alt="" aria-hidden className="size-[15px] invert" />
           </button>
 
-          {/* 답사(survey.py)가 실제로 찍어 둔 스크린샷 갤러리 — /api/shots가
-              서버에 붙은 뒤로 다시 연결했다. 재생 중에는 안 띄운다: 재생은
+          {/* 방금 끝난 사람부터 하나씩 재생해 볼 수 있다 — 전체 실행이
+              끝나길 기다릴 필요 없다(journeys.py::build_replay 참고). */}
+          {Object.keys(personaReplays).length > 0 ? (
+            <div className="mt-[28px] w-full">
+              <p className="text-[14px] font-semibold text-ink">
+                답사자가 본 화면 — {Object.keys(personaReplays).length}명 재생 가능
+              </p>
+              <div className="mt-[10px] flex flex-wrap gap-[8px]">
+                {Object.values(personaReplays).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setReplayId(p.id)}
+                    className="flex items-center gap-[6px] rounded-[10px] border border-line bg-white px-[10px] py-[6px] text-[13px] font-medium text-ink hover:bg-black/[0.03]"
+                  >
+                    <PersonaFace id={p.id} size={20} />
+                    {label(p.id)}
+                    <span
+                      className={`rounded-[5px] px-[5px] py-[1px] text-[11px] font-bold text-white ${
+                        p.outcome === 'success' ? 'bg-[#00824f]' : 'bg-[#df2d48]'
+                      }`}
+                    >
+                      {p.end_label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* 답사(survey.py)가 화면 종류별로 찍어 둔 사진 전체 목록 — 위
+              재생이 쓰는 사진의 원본이다. 재생 중에는 안 띄운다: 재생은
               이미 끝난 기록을 다시 보여주는 것뿐이라, 지금 막 답사가 도는
               것처럼 보이면 없는 일을 지어내는 셈이다. */}
           {replaying || !project.data?.preview_url ? null : (
@@ -159,11 +214,20 @@ export function RunningPage() {
               rel="noreferrer"
               className="mt-[14px] text-[15px] text-subtext underline underline-offset-4 hover:text-ink"
             >
-              답사자가 본 화면 보기 (스크린샷)
+              답사 스크린샷 전체 보기
             </a>
           )}
         </div>
       </PageBody>
+
+      {replayId && personaReplays[replayId] ? (
+        <PersonaReplayModal
+          person={personaReplays[replayId]}
+          others={Object.values(personaReplays)}
+          onPick={setReplayId}
+          onClose={() => setReplayId(null)}
+        />
+      ) : null}
     </AppLayout>
   )
 }
