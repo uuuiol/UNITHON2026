@@ -382,6 +382,36 @@ def map_stem(target: dict) -> str:
     return (safe.strip("_") or "site")[:MAP_STEM_MAX_LEN]
 
 
+#: 이 접미사로 끝나는 호스트는 서브도메인 하나하나가 완전히 남의 사이트다
+#: (우리 테스트베드 자체가 그중 하나인 lsb1022.github.io다) — _registrable_domain()이
+#: 이런 호스트를 등록 도메인 단위로 넓히면 안 된다. 완전한 공개접미사목록(PSL)이
+#: 아니라 이 프로젝트가 실제로 마주치는 흔한 것들만 담은 근사치다.
+_MULTI_TENANT_SUFFIXES = {
+    "github.io", "vercel.app", "netlify.app", "pages.dev", "web.app",
+    "firebaseapp.com", "herokuapp.com", "workers.dev", "glitch.me", "repl.co",
+    "blogspot.com", "tistory.com", "wordpress.com", "s3.amazonaws.com",
+}
+#: .kr/.jp 등 "2단짜리 TLD"처럼 보이지만 실제 등록 단위는 3단인 경우
+#: (example.co.kr — "co.kr"이 아니라 "example.co.kr"이 한 사이트).
+_TWO_PART_TLDS = {"kr", "jp", "uk", "au", "nz", "br", "cn", "in", "za"}
+_TWO_PART_SECOND_LEVEL = {"co", "or", "go", "ac", "ne", "pe", "re"}
+
+
+def _registrable_domain(host: str) -> str:
+    """등록 도메인 근사치. 완전한 PSL이 아니다 — 한국 사이트(.co.kr 등)와
+    이 프로젝트가 실제로 만나는 멀티테넌트 호스팅만 다룬다."""
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+    last_two = ".".join(labels[-2:])
+    last_three = ".".join(labels[-3:])
+    if last_two in _MULTI_TENANT_SUFFIXES or last_three in _MULTI_TENANT_SUFFIXES:
+        return host  # 이미 최대로 구체적인 "사이트"다 — 더 넓히지 않는다.
+    if labels[-1] in _TWO_PART_TLDS and labels[-2] in _TWO_PART_SECOND_LEVEL:
+        return last_three
+    return last_two
+
+
 def in_scope(url: str, target: dict) -> bool:
     """이 주소가 검사 범위 안인가. 벗어나면 페르소나를 되돌린다.
 
@@ -389,6 +419,14 @@ def in_scope(url: str, target: dict) -> bool:
     쇼핑 코너를 검사하라고 줬는데 회사 소개나 블로그를 헤매면 그 기록은
     검사 대상에 대한 것이 아니다. 로고를 눌러 첫 화면으로 가는 것만
     예외로 열어둔다. 사람도 길을 잃으면 로고부터 누른다.
+
+    다만 호스트가 완전히 같아야만 통과시키면, 검색만 다른 서브도메인에서
+    답하는 사이트(예: 네이버 www.naver.com → search.naver.com)에서는 검색
+    자체가 막힌다(2026-09-04 실측: "일반(위키·포털)" 사이트에 검색이 정상
+    행동인 미션인데도 전원이 "검사 범위 밖"으로 튕겨 포기함 — SEARCH_RULE이
+    이미 이런 사이트는 검색을 열어두는데, in_scope가 그 결과 화면 자체를
+    막고 있었다). 등록 도메인이 같으면 서브도메인이 달라도 통과시킨다 —
+    단, github.io 같은 멀티테넌트 호스팅은 예외(_registrable_domain 참고).
     """
     if not url:
         return False
@@ -397,4 +435,11 @@ def in_scope(url: str, target: dict) -> bool:
                   or url.startswith(scope + "?")):
         return True
     origin = target.get("origin") or ""
-    return bool(origin) and url.rstrip("/") == origin.rstrip("/")
+    if origin and url.rstrip("/") == origin.rstrip("/"):
+        return True
+
+    from urllib.parse import urlsplit
+    site_host = urlsplit(origin).netloc if origin else ""
+    url_host = urlsplit(url).netloc
+    return bool(site_host and url_host
+                and _registrable_domain(site_host) == _registrable_domain(url_host))
