@@ -442,9 +442,9 @@ function PersonaView({ testId }: { testId: string }) {
             {items.map((persona) => (
               <tr
                 key={persona.id}
-                onClick={() => replay?.[persona.id] && setReplayId(persona.id)}
+                onClick={() => replay?.[persona.code] && setReplayId(persona.code)}
                 className={`border-t border-line text-[14px] ${
-                  replay?.[persona.id] ? 'cursor-pointer hover:bg-black/[0.02]' : ''
+                  replay?.[persona.code] ? 'cursor-pointer hover:bg-black/[0.02]' : ''
                 }`}
               >
                 <td className="px-[18px] py-[12px]">

@@ -471,7 +471,7 @@ function PersonaCard({
               // 그 사람의 스텝을 이어서 봐야 보이므로 재생으로 넘긴다.
               <button
                 type="button"
-                onClick={() => onReplay(person.id)}
+                onClick={() => onReplay(person.code)}
                 className="rounded-[8px] bg-main px-[12px] py-[6px] text-[12px] font-semibold text-white"
               >
                 ▶ 이 사람 여정 재생
